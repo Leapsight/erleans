@@ -21,6 +21,11 @@ all() ->
     [manual_start_stop, activate_callback].
 
 init_per_suite(Config) ->
+    ok = filelib:ensure_dir("data"),
+    application:load(key_value),
+    application:load(app_config),
+    application:load(maps_utils),
+    application:load(utils),
     application:load(plum_db), % will load partisan
     application:load(erleans),
     application:set_env(partisan, peer_port, 10200),
@@ -31,7 +36,8 @@ init_per_suite(Config) ->
     application:set_env(partisan, periodic_interval, 100),
     logger:set_application_level(partisan, error),
     logger:set_application_level(erleans, debug),
-    {ok, _} = application:ensure_all_started(plum_db), % will start partisan
+    % will start partisan
+    {ok, _} = application:ensure_all_started(plum_db),
     {ok, _} = application:ensure_all_started(erleans),
     start_nodes(),
     Config.
