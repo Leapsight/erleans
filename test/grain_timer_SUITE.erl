@@ -31,23 +31,17 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(defaults, Config) ->
-    application:load(plum_db), % will load partisan
-    application:load(erleans),
-    {ok, _} = application:ensure_all_started(plum_db), % will start partisan
-    {ok, _} = application:ensure_all_started(erleans),
+    {ok, _} = test_utils:start(),
     Config;
 init_per_group(deactivate_after_30, Config) ->
-    application:load(erleans),
-    application:set_env(erleans, deactivate_after, 30),
-    {ok, _} = application:ensure_all_started(erleans),
+    {ok, _} = test_utils:start(fun () ->
+        application:set_env(erleans, deactivate_after, 30)
+    end),
     Config.
 
 end_per_group(_, _Config) ->
-    application:stop(erleans),
-    application:stop(plum_db), % will stop partisan
-    application:unload(erleans),
-    application:unload(plum_db),
-    ok.
+    test_utils:stop().
+
 
 single_timer(_Config) ->
     Grain = erleans:get_grain(?g, <<"timer-test-grain">>),

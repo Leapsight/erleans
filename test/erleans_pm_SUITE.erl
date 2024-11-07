@@ -31,23 +31,16 @@ groups() ->
 
 
 init_per_group(_, Config) ->
-    application:load(plum_db), % will load partisan
-    application:load(erleans),
-    logger:set_application_level(partisan, error),
-    logger:set_application_level(plum_db, error),
-    application:set_env(erleans, deactivate_after, ?DEACTIVATE_AFTER),
-    {ok, _} = application:ensure_all_started(plum_db),
-    {ok, _} = application:ensure_all_started(erleans),
+
+    {ok, _} = test_utils:start(fun () ->
+        application:set_env(erleans, deactivate_after, ?DEACTIVATE_AFTER)
+    end),
     GrainRef = erleans:get_grain(test_grain, <<"grain1">>),
     [{grainref, GrainRef}|Config].
 
 
 end_per_group(_, _Config) ->
-    application:stop(erleans),
-    application:stop(plum_db),
-    application:unload(erleans),
-    application:unload(plum_db),
-    ok.
+    test_utils:stop().
 
 
 init_per_suite(Config) ->

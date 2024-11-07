@@ -48,19 +48,15 @@ init_per_group(deactivate_after_50000, Config) ->
     init_per_group_(50000, Config).
 
 init_per_group_(DeactivateAfter, Config) ->
-    application:load(plum_db), % will load partisan
-    application:load(erleans),
-    application:set_env(erleans, deactivate_after, DeactivateAfter),
-    {ok, _} = application:ensure_all_started(plum_db),
-    {ok, _} = application:ensure_all_started(erleans),
+
+    {ok, _} = test_utils:start(fun () ->
+        application:set_env(erleans, deactivate_after, DeactivateAfter)
+    end),
+
     Config.
 
 end_per_group(_, _Config) ->
-    application:stop(erleans),
-    application:stop(plum_db),
-    application:unload(erleans),
-    application:unload(plum_db),
-    ok.
+    test_utils:stop().
 
 init_per_testcase(_, Config) ->
     Config.
