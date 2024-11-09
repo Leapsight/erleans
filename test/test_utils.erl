@@ -23,10 +23,6 @@ start(Fun) when is_function(Fun, 0) ->
     _ = Fun(),
 
     {ok, _} = application:ensure_all_started(plum_db),
-    ct:pal(info, "Waiting for PlumDB partitions to be ready"),
-    ct:pal(info, "Waiting for PlumDB hashtrees to be ready"),
-    ok = plum_db_startup_coordinator:wait_for_partitions(),
-    ok = plum_db_startup_coordinator:wait_for_hashtrees(),
 
     case net_kernel:start([partisan:node()]) of
         {ok, _} ->
