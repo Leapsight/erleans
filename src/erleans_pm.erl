@@ -878,7 +878,7 @@ sync_local_view(Peer, GrainKey, RemotePRef) ->
                     %% after we return
                     ok
             end;
-        L ->
+        _List ->
             %% More remote duplicates, this should converge by every peer
             %% applying this algorithm on every new registration.
             ok
