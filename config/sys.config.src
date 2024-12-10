@@ -4,13 +4,8 @@
             {default_provider, in_memory}
            ]},
 
- {plum_db, [
-    {prefixes, [
-        {erleans_pm, #{shard_by => prefix, type => ram}}
-    ]}
- ]},
-
  {partisan, [
+  {exchange_tick_period, 600000},
    {peer_port, ${PARTISAN_PEER_PORT}},
    {pid_encoding, false},
    {ref_encoding, false},
@@ -19,7 +14,7 @@
               partisan_pluggable_peer_service_manager}
   ]},
 
- {kernel, [{logger_level, debug},
+ {kernel, [{logger_level, info},
            {logger, [{filters, log, [{no_progress, {fun logger_filters:progress/2, stop}}]},
                      {handler, default, logger_std_h,
                       #{formatter => {logger_formatter, #{template => [time," ", file,":",line," ",level,": ",msg,"\n"]}}}}]}]}

@@ -31,7 +31,7 @@
 %% <li>
 %% A distributed and globally-replicated set of mappings from
 %% {@link grain_key()} to a single {@link partisan_remote_ref:p()}.
-%% This is stored on {@link plum_db}.
+%% This is stored on {@link bondy_mst}.
 %% </li>
 %% <li>
 %% A materialised view containing all the registrations (local and
@@ -66,24 +66,21 @@
 %% @end
 %% -----------------------------------------------------------------------------
 -module(erleans_pm).
--behavior(partisan_gen_server).
+-behaviour(bondy_mst_exchange).
+-behaviour(partisan_gen_server).
+-behaviour(partisan_plumtree_broadcast_handler).
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("partisan/include/partisan.hrl").
 -include("erleans.hrl").
 
--define(PDB_PREFIX, {?MODULE, registry}).
--define(TOMBSTONE, '$deleted').
+-define(PERSISTENT_KEY, {?MODULE, tree}).
+-define(TREE, persistent_term:get(?PERSISTENT_KEY)).
 
 -define(MONITOR_TAB, erleans_pm_monitor).
--define(VIEW_TAB, erleans_pm_view).
 
-%% Record stored on ?VIEW_TAB
--record(reg, {
-    key     ::  grain_key(),
-    pid     ::  partisan_remote_ref:p(),
-    type    ::  local | node() | '_'
-}).
+-define(PDB_PREFIX, {?MODULE, registry}).
+-define(TOMBSTONE, '$deleted').
 
 
 %% This server may receive a huge amount of messages.
@@ -94,12 +91,12 @@
 ]).
 
 -record(state, {
-    partisan_channel :: partisan:channel()
+    partisan_channel :: partisan:channel(),
+    exchange_state   :: bondy_mst_exchange:t()
 }).
 
 
 -type grain_key() :: {GrainId :: any(), ImplMod :: module()}.
-
 
 %% API
 -export([start_link/0]).
@@ -109,6 +106,19 @@
 -export([whereis_name/2]).
 -export([grain_ref/1]).
 -export([to_list/0]).
+
+%% BONDY_MST_EXCHANGE CALLBACKS
+-export([send/2]).
+-export([broadcast/1]).
+-export([on_merge/1]).
+
+%% PARTISAN_PLUMTREE_BROADCAST_HANLDER CALLBACKS
+-export([broadcast_data/1]).
+-export([broadcast_channel/0]).
+-export([exchange/1]).
+-export([graft/1]).
+-export([is_stale/1]).
+-export([merge/2]).
 
 %% PARTISAN_GEN_SERVER CALLBACKS
 -export([init/1]).
@@ -132,6 +142,8 @@
 -compile({no_auto_import, [monitor/3]}).
 -compile({no_auto_import, [demonitor/1]}).
 -compile({no_auto_import, [demonitor/2]}).
+
+
 
 
 %% =============================================================================
@@ -170,6 +182,7 @@ register_name() ->
     case erleans:grain_ref() of
         undefined ->
             {error, badgrain};
+
         GrainRef ->
             partisan_gen_server:call(?MODULE, {register_name, GrainRef})
     end.
@@ -190,6 +203,7 @@ unregister_name() ->
     case GrainRef == undefined of
         true ->
             {error, badgrain};
+
         false ->
             partisan_gen_server:call(?MODULE, {unregister_name, GrainRef})
     end.
@@ -245,6 +259,7 @@ whereis_name(GrainRef, [_|T] = L) when T =/= [] ->
     case lists:member(safe, L) of
         true ->
             whereis_name(GrainRef, [safe]);
+
         false ->
             whereis_name(GrainRef, [unsafe])
     end;
@@ -254,11 +269,11 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
         [] ->
             undefined;
 
-        ProcessRefs when Flag == safe ->
-            safe_pick(ProcessRefs, GrainRef);
+        ProcRefs when Flag == safe ->
+            safe_pick(ProcRefs, GrainRef);
 
-        [ProcessRef|_]  when Flag == unsafe ->
-            ProcessRef
+        [ProcRef|_]  when Flag == unsafe ->
+            ProcRef
     end.
 
 
@@ -269,32 +284,32 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec grain_ref(partisan:any_pid()) ->
-    {ok, erleans:grain_ref()}
-    | {error, timeout | any()}.
+    {ok, erleans:grain_ref()} | {error, timeout | any()}.
 
-grain_ref(Process) when is_pid(Process) ->
-    case ets:lookup(?MONITOR_TAB, Process) of
+grain_ref(Pid) when is_pid(Pid) ->
+    case ets:lookup(?MONITOR_TAB, Pid) of
         [] ->
             {error, not_found};
 
-        [{Process, GrainRef, _}] ->
+        [{Pid, GrainRef, _}] ->
             {ok, GrainRef}
     end;
 
-grain_ref(Process) ->
-    %% Fail if this si not a partisan pid reference
-    partisan:is_pid(Process) orelse error({badarg, [Process]}),
+grain_ref(ProcRef) ->
+    %% Fail if this is not a partisan pid reference
+    partisan:is_pid(ProcRef) orelse error({badarg, [ProcRef]}),
 
-    Node = partisan:node(Process),
+    Peer = partisan:node(ProcRef),
 
-    case Node == partisan:node() of
+    case Peer == partisan:node() of
         true ->
-            grain_ref(partisan_remote_ref:to_term(Process));
+            grain_ref(partisan_remote_ref:to_term(ProcRef));
 
         false ->
-            case partisan_rpc:call(Node, ?MODULE, grain_ref, [Process], 5000) of
+            case partisan_rpc:call(Peer, ?MODULE, grain_ref, [ProcRef], 5000) of
                 {badrpc, Reason} ->
                     {error, Reason};
+
                 Result ->
                     Result
             end
@@ -308,7 +323,217 @@ grain_ref(Process) ->
 -spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
 
 to_list() ->
-    ets:match(?VIEW_TAB, #reg{key = '$1', pid = '$2', type = '_'}).
+    L = bondy_mst:fold(
+        ?TREE,
+        fun({GrainKey, Value}, Acc) ->
+            case sets:to_list(state_mvregister:query(Value)) of
+                [] ->
+                    Acc;
+
+                L ->
+                    case safe_pick(L) of
+                        undefined ->
+                            Acc;
+
+                        ProcRef ->
+                            [{GrainKey, ProcRef} | Acc]
+                    end
+            end
+        end,
+        []
+    ),
+    lists:reverse(L).
+
+
+
+%% =============================================================================
+%% BONDY_MST_EXCHANGE CALLBACKS
+%% =============================================================================
+
+
+
+send(Peer, Message) ->
+    partisan_gen_server:cast({?MODULE, Peer}, {exchange_message, Message}).
+
+
+broadcast(Event) ->
+    partisan:broadcast(Event, ?MODULE).
+
+
+on_merge(_Page) ->
+    %% We do nothing as we are using the MST as the store itself.
+    ok.
+
+
+
+%% =============================================================================
+%% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
+%% =============================================================================
+
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the channel to be used when broadcasting.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec broadcast_channel() -> partisan:channel().
+
+broadcast_channel() ->
+    application:get_env(erleans, partisan_channel, undefined).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Deconstructs a broadcast that is sent using
+%% `broadcast/2' as the handling module returning the message id
+%% and payload.
+%%
+%% > This function is part of the implementation of the
+%% partisan_plumtree_broadcast_handler behaviour.
+%% > You should never call it directly.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec broadcast_data(bondy_mst_exchange:event()) ->
+    {MessageId :: any(), Payload :: any()}.
+
+broadcast_data(Event) ->
+    %% We use the whole event as messageID
+    {Event, undefined}.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Merges a remote copy of an object record sent via broadcast w/ the
+%% local view for the key contained in the message id. If the remote copy is
+%% causally older than the current data stored then `false' is returned and no
+%% updates are merged. Otherwise, the remote copy is merged (possibly
+%% generating siblings) and `true' is returned.
+%%
+%% > This function is part of the implementation of the
+%% partisan_plumtree_broadcast_handler behaviour.
+%% > You should never call it directly.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec merge(MessageId :: any(), Payload :: any()) -> boolean().
+
+merge(Event, undefined) ->
+    partisan_gen_server:call(?MODULE, {exchange_merge, Event}).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Same as merge/2 but merges the object on `Node'
+%%
+%% > This function is part of the implementation of the
+%% partisan_plumtree_broadcast_handler behaviour.
+%% > You should never call it directly.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec merge(Peer :: node(), MessageId :: any(), Payload :: any()) -> boolean().
+
+merge(Peer, Event, undefined) ->
+    partisan_gen_server:call({?MODULE, Peer}, {exchange_merge, Event}).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Determines if the given context (version vector) is causually newer than
+%% an existing object. If the object missing or if the context does not represent
+%% an anscestor of the current key, false is returned. Otherwise, when the
+%% context does represent an ancestor of the existing object or the existing
+%% object itself, true is returned.
+%%
+%%
+%% > This function is part of the implementation of the
+%% partisan_plumtree_broadcast_handler behaviour.
+%% > You should never call it directly.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec is_stale(MessageId :: any()) -> boolean().
+
+is_stale(Event) ->
+    {Key, Value1} = bondy_mst_exchange:event_data(Event),
+
+    case bondy_mst:get(?TREE, Key) of
+        undefined ->
+            false;
+
+        Value0 ->
+            %% Checks if Value1 is an inflation of Value0, i.e. Value0 is an
+            %% ancestor of Value1
+            state_type:is_inflation(Value0, Value1)
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Returns the object associated with the given prefixed key `Pkey' and
+%% context `Context' (message id) if the currently stored version has an equal
+%% context. Otherwise returns the atom `stale'.
+%%
+%% Because it assumes that a grafted context can only be causally older than
+%% the local view, a `stale' response means there is another message that
+%% subsumes the grafted one.
+%%
+%% > This function is part of the implementation of the
+%% partisan_plumtree_broadcast_handler behaviour.
+%% > You should never call it directly.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec graft(MessageId :: any()) ->
+    stale | {ok, state_mvregister:state_mvregister()} | {error, term()}.
+
+graft({Event, undefined}) ->
+    Tree = ?TREE,
+    {Key, Value1} = bondy_mst_exchange:event_data(Event),
+
+    case bondy_mst:get(Tree, Key) of
+        undefined ->
+            %% There would have to be a serious error in implementation to hit
+            %% this case.
+            %% Catch it here b/c it would be much harder to detect
+            {error, {not_found, Key}};
+
+         Value0 ->
+            %% when grafting the context will never be causally newer
+            %% than what we have locally. Since its not equal,
+            %% it must be an ancestor. Thus we've sent another, newer
+            %% update that contains this context's information in
+            %% addition to its own.  This graft is deemed stale
+            case state_type:is_inflation(Value0, Value1) of
+                true ->
+                    stale;
+
+                false ->
+                    {ok, Value0}
+            end
+    end.
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Triggers an exchange.
+%% Calls {@link exchange/2} with an empty map as the second argument.
+%% > The exchange is only triggered if the application option `aae_enabled' is
+%% set to `true'.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec exchange(node()) -> {ok, pid()} | {error, term()}.
+
+exchange(Peer) ->
+    exchange(Peer, #{}).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Triggers an exchange.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec exchange(node(), map()) -> {ok, pid()} | {error, term()} | ignore.
+
+exchange(Peer, Opts) ->
+    case partisan_gen_server:call(?MODULE, {exchange_trigger, Peer, Opts}) of
+        ok ->
+            %% We handle exchanges outselves so we return ignore
+            ignore;
+
+        {error, _} = Error ->
+            Error
+    end.
+
 
 
 
@@ -340,42 +565,30 @@ init(_) ->
         ]
     ),
 
-    %% Materialised view derived from the global store (plum_db table)
-    %% In this table we store at most one #reg{type = local} and/or one or more
-    %% #reg{type = node()} for a Key where Key grain_key()
-    ?VIEW_TAB = ets:new(
-        ?VIEW_TAB,
-        [
-            bag,
-            protected,
-            named_table,
-            {keypos, 2},
-            {write_concurrency, true},
-            {read_concurrency, true},
-            {decentralized_counters, true}
-        ]
-    ),
-
-    %% Subscribe to plum_db object_update events
-    MS = [{
-        %% {
-        %%    {{?MODULE, registry}, {node(), grain_key()} = Key},
-        %%    NewObj,
-        %%    ExistingObj
-        %% }
-        {{?PDB_PREFIX, '_'}, '_', '_'},
-        [],
-        [true]
-    }],
-    ok = plum_db_events:subscribe(object_update, MS),
-
     %% We monitor all nodes so that we can cleanup our view of the registry
     partisan:monitor_nodes(true),
 
     {channel, Channel} = lists:keyfind(channel, 1, partisan_gen:get_opts()),
 
+    %% We create an ets-based MST bound to this process.
+    %% The ets table will be garbage collected if this process terminates.
+    %% ets-based trees support read_concurrency so we can share the it using
+    %% persistent_term
+    TreeStore = bondy_mst_store:new(
+        bondy_mst_ets_store, [{name, ~"erleans_pm"}]
+    ),
+    Tree = bondy_mst:new(#{store => TreeStore, merger => fun mst_merge/3}),
+
+    ok = persistent_term:put(?PERSISTENT_KEY, Tree),
+
+    %% We wrap the tree using the exchange module
+    Node = partisan:node(),
+    Opts = #{callback_mod => ?MODULE, max_merges => 3, max_same_merge => 1},
+    {ok, ExchangeState} = bondy_mst_exchange:init(Node, Tree, Opts),
+
     State = #state{
-        partisan_channel = Channel
+        partisan_channel = Channel,
+        exchange_state = ExchangeState
     },
 
     {ok, State, {continue, monitor_existing}}.
@@ -388,7 +601,7 @@ handle_continue(monitor_existing, State) ->
     %% In case the table is new, it would be empty. Otherwise, we would iterate
     %% over registrations that were registered by a previous instance of this
     %% gen_server before it crashed.
-    %% TWe re-monitor alive pids and remove dead ones.
+    %% We re-monitor alive pids and remove dead ones.
     Fun = fun
         ({Pid, GrainRef, _OldRef}) ->
             case erlang:is_process_alive(Pid) of
@@ -401,7 +614,7 @@ handle_continue(monitor_existing, State) ->
                     ok = do_register_name(GrainRef, Pid, relaxed);
                 false ->
                     %% THe process has died, so we unregister. This will also
-                    %% remove the registration from the global table (plum_db).
+                    %% remove the registration from the global table (bondy_mst).
                     ok = do_unregister_name(GrainRef, Pid)
             end;
 
@@ -412,33 +625,6 @@ handle_continue(monitor_existing, State) ->
 
     %% We should now have all existing local grains re-registered on this
     %% server and gossip messages sent to cluster peers.
-    {noreply, State, {continue, sync_remote}};
-
-handle_continue(sync_remote, State) ->
-    %% This prevents any grain to be registered as we are blocking the server
-    %% until we finish.
-    Node = partisan:node(),
-
-    Fun = fun
-        ({{Peer, GrainKey}, ProcessRef}) when Peer == Node ->
-            sync_global_registration(GrainKey, ProcessRef);
-
-        ({{Peer, GrainKey}, ProcessRef}) when Peer =/= Node ->
-            sync_local_view(Peer, GrainKey, ProcessRef)
-    end,
-
-    Opts = [
-        {remove_tombstones, true},
-        %% We want lww to resolve any conflict. In general they shouldn't exist
-        %% as only the owner of a registration can update it
-        {resolver, lww},
-        %% We do not want to update registrations we do not own, so our fun
-        %% considers this
-        {allow_put, false}
-    ],
-
-    ok = plum_db:foreach(Fun, ?PDB_PREFIX, Opts),
-
     {noreply, State};
 
 handle_continue(_, State) ->
@@ -453,61 +639,22 @@ when is_pid(Caller) ->
 
     %% We get all known registrations order by location local < node(), and then
     %% by node().
-    Registrations = lookup(GrainRef),
+    Processes = lookup(GrainRef),
 
     %% We then exclude unreachable grains
-    Reply = case exclude_unreachable(Registrations) of
+    Reply = case exclude_unreachable(Processes) of
         [] ->
-            %% Nothing registered or unreachable, so we allow the local
+            %% Nothing registered or all unreachable, so we allow the local
             %% registration
             do_register_name(GrainRef, Caller);
 
-        [ProcessRef|_] ->
+        [ProcRef|_] ->
             %% We found at least one active grain that is reachable, so we pick
             %% it. If there was a local grain registered under GrainRef,
-            %% ProcessRef would be it (becuase of ordering guarantee).
-            {error, {already_in_use, ProcessRef}}
+            %% ProcRef would be it (becuase of ordering guarantee).
+            {error, {already_in_use, ProcRef}}
     end,
 
-    {reply, Reply, State};
-
-handle_call({register_name_test, GrainRef, PRef}, _From, State) ->
-    %% Only for testing (se export of register_name/2)
-    %% Add to local materialised view
-    Node = partisan:node(PRef),
-
-    Reply =
-        case Node == partisan:node() of
-            true ->
-                do_register_name(GrainRef, partisan_remote_ref:to_pid(PRef));
-            false ->
-                %% We simulate a remote registration
-                Obj = new_reg(grain_key(GrainRef), PRef, Node),
-                true = ets:insert(?VIEW_TAB, Obj),
-
-                %% Add to globally replicated table
-                Key = {Node, grain_key(GrainRef)},
-                ok = plum_db:put(?PDB_PREFIX, Key, PRef)
-        end,
-    {reply, Reply, State};
-
-handle_call({unregister_name_test, GrainRef, PRef}, _From, State) ->
-    %% Only for testing (se export of unregister_name/2)
-    Node = partisan:node(PRef),
-
-    Reply =
-        case Node == partisan:node() of
-            true ->
-                do_unregister_name(GrainRef, partisan_remote_ref:to_pid(PRef));
-            false ->
-                %% We simulate a remote registration
-                Obj = new_reg(grain_key(GrainRef), PRef, Node),
-                true = ets:delete_object(?VIEW_TAB, Obj),
-
-                %% Remove to globally replicated table
-                Key = {Node, grain_key(GrainRef)},
-                ok = plum_db:delete(?PDB_PREFIX, Key)
-        end,
     {reply, Reply, State};
 
 handle_call({register_name, _}, _From, State) ->
@@ -523,6 +670,57 @@ handle_call({unregister_name, _}, _From, State) ->
     %% A call from a remote node, now allowed
     {reply, {error, not_local}, State};
 
+%% handle_call({register_name_test, GrainRef, ProcRef}, _From, State) ->
+%%     %% Only for testing (se export of register_name/2)
+%%     %% Add to local materialised view
+%%     Node = partisan:node(ProcRef),
+
+%%     Reply =
+%%         case Node == partisan:node() of
+%%             true ->
+%%                 Pid = partisan_remote_ref:to_pid(ProcRef),
+%%                 do_register_name(GrainRef, Pid);
+%%             false ->
+%%                 Key = {Node, grain_key(GrainRef)},
+%%                 ok = plum_db:put(?PDB_PREFIX, Key, ProcRef)
+%%         end,
+%%     {reply, Reply, State};
+
+%% handle_call({unregister_name_test, GrainRef, ProcRef}, _From, State) ->
+%%     %% Only for testing (se export of unregister_name/2)
+%%     Node = partisan:node(ProcRef),
+
+%%     Reply =
+%%         case Node == partisan:node() of
+%%             true ->
+%%                 do_unregister_name(
+%%                     GrainRef, partisan_remote_ref:to_pid(ProcRef)
+%%                 );
+
+%%             false ->
+%%                 %% We simulate a remote registration
+%%                 %% Remove to globally replicated table
+%%                 Key = {Node, grain_key(GrainRef)},
+%%                 ok = plum_db:delete(?PDB_PREFIX, Key)
+%%         end,
+%%     {reply, Reply, State};
+
+handle_call({exchange_merge, Event}, _From, State) ->
+    ES = bondy_mst_exchange:handle(Event, State#state.exchange_state),
+    %% Required by Plumtree, but not sure we need this as bondy_mst.
+    %% Merges a remote copy of an object record sent via broadcast w/ the
+    %% local view for the key contained in the message id. If the remote copy is
+    %% causally older than the current data stored then `false' is returned and
+    %% no updates are merged. Otherwise, the remote copy is merged (possibly
+    %% generating siblings) and `true' is returned.
+    Reply = true,
+    {reply, Reply, State#state{exchange_state = ES}};
+
+handle_call({exchange_trigger, Peer, _Opts}, _From, State) ->
+    ES = bondy_mst_exchange:trigger(Peer, State#state.exchange_state),
+    Reply = ok,
+    {reply, Reply, State#state{exchange_state = ES}};
+
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -530,14 +728,18 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Request :: term(), State :: term()) ->
     {noreply, NewState :: term()}.
 
-handle_cast({force_unregister_name, GrainRef, Pref}, State) ->
-    %% Internal case to deal with inconsistencies
-    case ets:lookup(?VIEW_TAB, grain_key(GrainRef)) of
-        [#reg{type = local, pid = X}] when X =/= Pref ->
-            Pid = partisan_remote_ref:to_pid(Pref),
-            ok = do_unregister_name(GrainRef, Pid);
+handle_cast({exchange_message, Message}, State) ->
+    ES = bondy_mst_exchange:handle(Message, State#state.exchange_state),
+    {noreply, State#state{exchange_state = ES}};
 
-        _ ->
+handle_cast({force_unregister_name, GrainRef, ProcRef}, State) ->
+    %% Internal case to deal with inconsistencies
+    case partisan_remote_ref:is_local(ProcRef) of
+        true ->
+            Pid = partisan_remote_ref:to_pid(ProcRef),
+            do_unregister_name(GrainRef, Pid);
+
+        false ->
             ok
     end,
     {noreply, State};
@@ -560,32 +762,6 @@ handle_info({'DOWN', MRef, process, Pid, _}, State) ->
     ok = do_unregister_name(Pid),
     {noreply, State};
 
-handle_info({plum_db_event, object_update, Payload}, State) ->
-    Node = partisan:node(),
-    {{_Prefix, Key}, Obj, PrevObj} = Payload,
-
-    ?LOG_DEBUG(#{
-        message => "plum_db_event object_update received",
-        key => Key,
-        object => Obj,
-        prev_obj => PrevObj
-    }),
-
-    %% Value can be a partisan_remote_reg:p() or ?TOMBSTONE
-    Value = plum_db_object:value(plum_db_object:resolve(Obj, lww)),
-
-    case Key of
-        {Node, GrainKey} ->
-            %% A peer updated or deleted our registration on the global registry.
-            %% This should not happen, ensure we are in sync.
-            sync_global_registration(GrainKey, Value);
-
-        {Peer, GrainKey} ->
-            sync_local_view(Peer, GrainKey, Value)
-    end,
-
-
-    {noreply, State};
 
 handle_info(_, State) ->
     {noreply, State}.
@@ -596,6 +772,7 @@ handle_info(_, State) ->
     term().
 
 terminate(_Reason, _State) ->
+    _ = persistent_term:erase(?PERSISTENT_KEY),
     ok = unregister_all().
 
 
@@ -604,6 +781,34 @@ terminate(_Reason, _State) ->
 %% PRIVATE
 %% =============================================================================
 
+
+
+mst_merge(_Key, A, B) ->
+    state_mvregister:merge(A, B).
+
+
+
+sort_conflicting_values(MVRegister) ->
+    Set = state_mvregister:query(MVRegister),
+    lists:sort(
+        fun(A, B) ->
+            Result = {
+                partisan_remote_ref:is_local(A),
+                partisan_remote_ref:is_local(B)
+            },
+            case Result of
+                {true, _} ->
+                    true;
+
+                {_, true} ->
+                    false;
+
+                {false, false} ->
+                    A =< B
+            end
+        end,
+        sets:to_list(Set)
+    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -634,15 +839,13 @@ do_register_name(GrainRef, Pid) ->
 do_register_name(GrainRef, Pid, Mode) when is_pid(Pid) ->
     case monitor(GrainRef, Pid, Mode) of
         ok ->
-            %% Add to local materialised view
-            Obj = new_reg(grain_key(GrainRef), Pid, local),
-            true = ets:insert(?VIEW_TAB, Obj),
-
-            %% Add to global registry (globally replicated table)
-            Node = partisan:node(),
-            Key = {Node, grain_key(GrainRef)},
-            Pref = partisan_remote_ref:from_term(Pid),
-            ok = plum_db:put(?PDB_PREFIX, Key, Pref);
+            Key = grain_key(GrainRef),
+            ProcRef = partisan_remote_ref:from_term(Pid),
+            {ok, Value} = state_type:mutate(
+                {set, 0, ProcRef}, partisan:node(), state_mvregister:new()
+            ),
+            _Tree = bondy_mst:insert(?TREE, Key, Value),
+            ok;
 
         {error, _} = Error ->
             Error
@@ -673,13 +876,25 @@ do_unregister_name(Pid) when is_pid(Pid) ->
 -spec do_unregister_name(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> true.
 
 do_unregister_name(GrainRef, Pid) when is_pid(Pid) ->
-    GrainKey = grain_key(GrainRef),
-    Key = {partisan:node(), GrainKey},
-
+    %% Demonitor
     ok = demonitor(Pid),
     true = ets:delete(?MONITOR_TAB, Pid),
-    true = ets:delete_object(?VIEW_TAB, new_reg(GrainKey, Pid, local)),
-    ok = plum_db:delete(?PDB_PREFIX, Key).
+
+    %% Insert TOMBSTONE
+    Key = grain_key(GrainRef),
+
+    case bondy_mst:get(?TREE, Key) of
+        undefined ->
+            %% SHOULD NOT HAPPEN
+            ok;
+        MVRegister ->
+            ProcRef = partisan_remote_ref:from_term(Pid),
+            {ok, Value} = state_type:mutate(
+                {set, 0, ProcRef}, ?TOMBSTONE, MVRegister
+            ),
+            _Tree = bondy_mst:insert(?TREE, Key, Value),
+            ok
+    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -689,22 +904,6 @@ do_unregister_name(GrainRef, Pid) when is_pid(Pid) ->
 %% -----------------------------------------------------------------------------
 grain_key(#{id := Id, implementing_module := Mod}) ->
     {Id, Mod}.
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-new_reg(Key, Pid, Type) when is_pid(Pid) ->
-    new_reg(Key, partisan_remote_ref:from_term(Pid), Type);
-
-new_reg({_, _} = Key, PidRef, Type) when Type == local; is_atom(Type) ->
-    #reg{
-        key = Key,
-        pid = PidRef,
-        type = Type
-    }.
 
 
 %% -----------------------------------------------------------------------------
@@ -745,14 +944,6 @@ demonitor(Pid) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-lookup(Term) ->
-    [P || #reg{pid = P} <- lookup_registrations(Term)].
-
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -760,128 +951,18 @@ lookup(Term) ->
 %% local ets-based materialised view.
 %% @end
 %% -----------------------------------------------------------------------------
--spec lookup_registrations(GrainRef :: erleans:grain_ref() | grain_key()) ->
+-spec lookup(GrainRef :: erleans:grain_ref() | grain_key()) ->
     [partisan_remote_ref:p()].
 
-lookup_registrations(#{id := _} = GrainRef) ->
-    lookup_registrations(grain_key(GrainRef));
+lookup(#{id := _} = GrainRef) ->
+    lookup(grain_key(GrainRef));
 
-lookup_registrations({_, _} = GrainKey) ->
-    lists:sort(
-        fun
-            (#reg{type = local}, #reg{type = _}) ->
-                true;
-
-            (#reg{type = _}, #reg{type = local}) ->
-                false;
-
-            (#reg{type = A}, #reg{type = B}) ->
-                A =< B
-        end,
-        ets:lookup(?VIEW_TAB, GrainKey)
-    ).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-sync_global_registration(GrainKey, Term) ->
-    PidPattern =
-        case Term of
-            ?TOMBSTONE ->
-                '_';
-            _ ->
-                partisan_remote_ref:to_pid(Term)
-        end,
-
-    Pattern = #reg{
-        key = GrainKey,
-        pid = PidPattern,
-        type = local
-    },
-
-    case ets:match_object(?VIEW_TAB, Pattern) of
-        [] when Term == ?TOMBSTONE ->
-            %% This should not happen as peers are only allowed to delete
-            %% owned registrations. But the global registry is in sync.
-            ok;
-
-        [] ->
-            %% The case for and invalid references in the global registry.
-            %% This could be a registration that we were not able to remove
-            %% on terminate/2 the last time we shutdown/crashed e.g.
-            %% gossip message loss and/or network split when shutdown/
-            %% crash occured.
-            Key = {partisan:node(), GrainKey},
-            ok = plum_db:delete(?PDB_PREFIX, Key);
-
-        [#reg{pid = ProcessRef}] when Term == ?TOMBSTONE ->
-            %% This should not happen as no other node should be deleting
-            %% our registrations.
-            Key = {partisan:node(), GrainKey},
-            ok = plum_db:put(?PDB_PREFIX, Key, ProcessRef);
-
-        [#reg{pid = ProcessRef}] when Term == ProcessRef ->
-            %% This should not happen as no other node should be deleting
-            %% our registrations.
-            %% But the global registry is in sync.
-            ok;
-
-        [#reg{pid = ProcessRef}] when Term =/= ProcessRef ->
-            %% An old entry remained in the global registry, we rectify
-            Key = {partisan:node(), GrainKey},
-            ok = plum_db:put(?PDB_PREFIX, Key, ProcessRef)
-
-    end.
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-sync_local_view(Peer, GrainKey, ?TOMBSTONE) ->
-    %% A Peer removed a registration, we need to update our view
-    Pattern = #reg{
-        key = GrainKey,
-        pid = '_',
-        type = Peer
-    },
-    true = ets:match_delete(?VIEW_TAB, Pattern),
-    ok;
-
-sync_local_view(Peer, GrainKey, RemotePRef) ->
-    %% A peer created or updated a registration, we update our view
-    true = ets:insert(?VIEW_TAB, new_reg(GrainKey, RemotePRef, Peer)),
-
-    %% But we need to remove any locl duplicates, as local registration are
-    %% preferred by lookup/1 and thus whereis_name/1
-    case lookup_registrations(GrainKey) of
-        [] ->
-            ok;
-
-        [#reg{key = {Id, ImplMod} = type = local, pid = LocalPRef} | _] ->
-            GrainRef = erleans:get_grain(ImplMod, Id),
-            case erleans_grain:is_location_right(GrainRef, LocalPRef) of
-                true ->
-                    %% Keep local and request deactivation of remote one.
-                    ok = deactivate_grain(GrainRef, RemotePRef);
-
-                false ->
-                    %% Keep remote and request deactivation of local
-                    ok = deactivate_grain(GrainRef, LocalPRef);
-
-                noproc ->
-                    %% Just died while we are blocking this server
-                    %% no need to request deactivation as it will be done
-                    %% after we return
-                    ok
-            end;
-        L ->
-            %% More remote duplicates, this should converge by every peer
-            %% applying this algorithm on every new registration.
-            ok
+lookup({_, _} = GrainKey) ->
+    case bondy_mst:get(?TREE, GrainKey) of
+        undefined ->
+            [];
+        MVRegister ->
+            sort_conflicting_values(MVRegister)
     end.
 
 
@@ -890,31 +971,34 @@ sync_local_view(Peer, GrainKey, RemotePRef) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-deactivate_grain(GrainRef, ProcessRef) ->
-    case erleans_grain:deactivate(ProcessRef) of
+deactivate_grain(GrainRef, ProcRef) ->
+    case erleans_grain:deactivate(ProcRef) of
         ok ->
             ?LOG_NOTICE(#{
                 description => "Requested duplicate deactivation",
                 grain => GrainRef,
-                pid => ProcessRef
+                pid => ProcRef
             });
 
         {error, Reason} when Reason == not_found; Reason == not_active ->
             ?LOG_ERROR(#{
                 description => "Failed to deactivate duplicate",
                 grain => GrainRef,
-                pid => ProcessRef,
+                pid => ProcRef,
                 reason => Reason
             }),
             %% This is an inconsistency, we need to cleanup.
             %% We ask the peer to do it, via a private cast (peer can be us)
-            remote_unregister_name(GrainRef, ProcessRef);
+            partisan_gen_server:cast(
+                {?MODULE, partisan_remote_ref:node(ProcRef)},
+                {force_unregister_name, GrainRef, ProcRef}
+            );
 
         {error, Reason} ->
             ?LOG_ERROR(#{
                 description => "Failed to deactivate duplicate",
                 grain => GrainRef,
-                pid => ProcessRef,
+                pid => ProcRef,
                 reason => Reason
             }),
             ok
@@ -952,10 +1036,10 @@ safe_pick(L) ->
 safe_pick([], _) ->
     undefined;
 
-safe_pick([ProcessRef | Rest], GrainRef) ->
-    try is_proc_alive(ProcessRef, GrainRef) of
+safe_pick([ProcRef | Rest], GrainRef) ->
+    try is_proc_alive(ProcRef, GrainRef) of
         true ->
-            ProcessRef;
+            ProcRef;
         false ->
             safe_pick(Rest, GrainRef)
     catch
@@ -971,8 +1055,8 @@ safe_pick([ProcessRef | Rest], GrainRef) ->
 %% -----------------------------------------------------------------------------
 -spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
 
-is_proc_alive(ProcessRef) ->
-    is_proc_alive(ProcessRef, undefined).
+is_proc_alive(ProcRef) ->
+    is_proc_alive(ProcRef, undefined).
 
 
 %% -----------------------------------------------------------------------------
@@ -983,11 +1067,11 @@ is_proc_alive(ProcessRef) ->
 -spec is_proc_alive(partisan_remote_ref:p(), erleans:grain_ref() | undefined) ->
     boolean() | no_return().
 
-is_proc_alive(ProcessRef, undefined) ->
-    partisan:is_process_alive(ProcessRef);
+is_proc_alive(ProcRef, undefined) ->
+    partisan:is_process_alive(ProcRef);
 
-is_proc_alive(ProcessRef, GrainRef) ->
-    case grain_ref(ProcessRef) of
+is_proc_alive(ProcRef, GrainRef) ->
+    case grain_ref(ProcRef) of
         {ok, GrainRef} ->
             true;
         {ok, _} ->
@@ -1009,8 +1093,8 @@ is_proc_alive(ProcessRef, GrainRef) ->
 exclude_unreachable(undefined) ->
     [];
 
-exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
-    lists:filter(fun is_reachable/1, ProcessRefs).
+exclude_unreachable(ProcRefs) when is_list(ProcRefs) ->
+    lists:filter(fun is_reachable/1, ProcRefs).
 
 
 %% -----------------------------------------------------------------------------
@@ -1018,25 +1102,14 @@ exclude_unreachable(ProcessRefs) when is_list(ProcessRefs) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-is_reachable(ProcessRef) ->
+is_reachable(ProcRef) ->
     try
-        is_proc_alive(ProcessRef)
+        is_proc_alive(ProcRef)
     catch
         _:_ ->
             false
     end.
 
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-remote_unregister_name(GrainRef, ProcessRef) ->
-    ServerRef = {?MODULE, partisan:node(ProcessRef)},
-    partisan_gen_server:cast(
-        ServerRef, {force_unregister_name, GrainRef, ProcessRef}
-    ).
 
 
 %% -----------------------------------------------------------------------------
@@ -1084,8 +1157,8 @@ unregister_all('$end_of_table') ->
     ok
     | {error, {already_in_use, partisan_remote_ref:p()}}.
 
-register_name(GrainRef, PRef) ->
-    partisan_gen_server:call(?MODULE, {register_name_test, GrainRef, PRef}).
+register_name(GrainRef, ProcRef) ->
+    partisan_gen_server:call(?MODULE, {register_name_test, GrainRef, ProcRef}).
 
 
 %% -----------------------------------------------------------------------------
@@ -1096,8 +1169,10 @@ register_name(GrainRef, PRef) ->
 -spec unregister_name(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok | {error, badgrain | not_owner}.
 
-unregister_name(#{id := _} = GrainRef, PRef) ->
-    partisan_gen_server:call(?MODULE, {unregister_name_test, GrainRef, PRef}).
+unregister_name(#{id := _} = GrainRef, ProcRef) ->
+    partisan_gen_server:call(
+        ?MODULE, {unregister_name_test, GrainRef, ProcRef}
+    ).
 
 
 -endif.

@@ -74,3 +74,4 @@ handle_cast(_Msg, State) ->
 
 setup_config(Config) ->
     [ets:insert(?TABLE, {Key, Value}) || {Key, Value} <- Config].
+

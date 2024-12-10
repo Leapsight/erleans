@@ -27,13 +27,37 @@
 -include_lib("kernel/include/logger.hrl").
 
 start(_StartType, _StartArgs) ->
+    ok = setup_partisan(),
+    _ = application:ensure_all_started(partisan, permanent),
+    _ = application:ensure_all_started(bondy_mst, permanent),
+
     Config = application:get_all_env(erleans),
-    %% plum_db will start partisan
-    _ = application:ensure_all_started(plum_db, permanent),
     erleans_sup:start_link(Config).
 
 stop(_State) ->
     erleans_cluster:leave(),
     ok.
 
-%% Internal functions
+
+
+
+%% =============================================================================
+%% PRIVATE
+%% =============================================================================
+
+
+
+setup_partisan() ->
+    Env0 = maps:from_list(application:get_all_env(partisan)),
+    BroadcastMods = maps:get(broadcast_mods, Env0, []),
+    Overrides = #{
+        broadcast_mods => ordsets:to_list(
+            ordsets:union(
+                ordsets:from_list([erleans_pm, partisan_plumtree_backend]),
+                ordsets:from_list(BroadcastMods)
+            )
+        )
+    },
+    Env1 = maps:merge(Env0, Overrides),
+    application:set_env([{partisan, maps:to_list(Env1)}]).
+
