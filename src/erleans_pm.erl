@@ -33,13 +33,6 @@
 %% {@link grain_key()} to a single {@link partisan_remote_ref:p()}.
 %% This is stored on {@link bondy_mst}.
 %% </li>
-%% <li>
-%% A materialised view containing all the registrations (local and
-%% remote) for a {@link erleans:grain_ref()}.
-%% This is stored in a protected @{link ets} `bag' table.
-%% This table is used to resolve lookups and is constructued based on the
-%% insertions and deletions that happen on the previous two collections.
-%% </li>
 %% </ul>
 %%
 %% == Controls ==
@@ -66,7 +59,7 @@
 %% @end
 %% -----------------------------------------------------------------------------
 -module(erleans_pm).
--behaviour(bondy_mst_exchange).
+-behaviour(bondy_mst_grove).
 -behaviour(partisan_gen_server).
 -behaviour(partisan_plumtree_broadcast_handler).
 
@@ -76,27 +69,23 @@
 
 -define(PERSISTENT_KEY, {?MODULE, tree}).
 -define(TREE, persistent_term:get(?PERSISTENT_KEY)).
-
 -define(MONITOR_TAB, erleans_pm_monitor).
-
--define(PDB_PREFIX, {?MODULE, registry}).
 -define(TOMBSTONE, '$deleted').
 
-
 %% This server may receive a huge amount of messages.
-%% Make sure that they are stored off heap to avoid excessive GCs.
+%% We make sure that they are stored off heap to avoid excessive GCs.
 -define(OPTS, [
     {channel, application:get_env(erleans, partisan_channel, undefined)},
     {spawn_opt, [{message_queue_data, off_heap}]}
 ]).
 
 -record(state, {
-    partisan_channel :: partisan:channel(),
-    exchange_state   :: bondy_mst_exchange:t()
+    grove               ::  bondy_mst_grove:t(),
+    partisan_channel    ::  partisan:channel()
 }).
 
--type t() :: #state{}.
--type grain_key() :: {GrainId :: any(), ImplMod :: module()}.
+-type t()               ::  #state{}.
+-type grain_key()       ::  {GrainId :: any(), ImplMod :: module()}.
 
 %% API
 -export([start_link/0]).
@@ -107,12 +96,12 @@
 -export([grain_ref/1]).
 -export([to_list/0]).
 
-%% BONDY_MST_EXCHANGE CALLBACKS
+%% BONDY_MSRT_GROVE CALLBACKS
 -export([send/2]).
 -export([broadcast/1]).
 -export([on_merge/1]).
 
-%% PARTISAN_PLUMTREE_BROADCAST_HANLDER CALLBACKS
+%% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
 -export([broadcast_data/1]).
 -export([broadcast_channel/0]).
 -export([exchange/1]).
@@ -131,9 +120,9 @@
 
 %% TEST API
 -ifdef(TEST).
--export([register_name/2]).
--export([unregister_name/2]).
--dialyzer({nowarn_function, register_name/2}).
+    -export([register_name/2]).
+    -export([unregister_name/2]).
+    -dialyzer({nowarn_function, register_name/2}).
 -endif.
 
 -dialyzer({nowarn_function, register_name/0}).
@@ -142,7 +131,6 @@
 -compile({no_auto_import, [monitor/3]}).
 -compile({no_auto_import, [demonitor/1]}).
 -compile({no_auto_import, [demonitor/2]}).
-
 
 
 
@@ -191,6 +179,7 @@ register_name() ->
 %% -----------------------------------------------------------------------------
 %% @doc Unregisters a grain. This call fails with `badgrain' if the calling
 %% process is not the original caller to {@link register_name/0}.
+%%
 %% This call is serialised through the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
@@ -198,13 +187,12 @@ register_name() ->
     ok | {error, badgrain | not_owner}.
 
 unregister_name() ->
-    GrainRef = erleans:grain_ref(),
-
-    case GrainRef == undefined of
+    %% Gets the calling process grain_ref
+    case erleans:grain_ref() of
         true ->
             {error, badgrain};
 
-        false ->
+        GrainRef ->
             partisan_gen_server:call(?MODULE, {unregister_name, GrainRef})
     end.
 
@@ -219,7 +207,7 @@ unregister_name() ->
 %% have multiple instances in the global registry. This function chooses the
 %% first reference in the list that represents a live process. Checking for
 %% liveness incurs in a remote call for remote processes and thus can be
-%% expensive in the presence of multiple instanciations. If you prefer to avoid
+%% expensive in the presence of multiple instantiations. If you prefer to avoid
 %% this check you can call {@link erleans_pm:whereis_name/2} passing [unsafe] as
 %% the second argument.
 %% @end
@@ -269,24 +257,25 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
         [] ->
             undefined;
 
-        ProcRefs when Flag == safe ->
-            safe_pick(ProcRefs, GrainRef);
-
-        [ProcRef|_]  when Flag == unsafe ->
-            ProcRef
+        ProcRefs ->
+            pick(ProcRefs, GrainRef, [Flag])
     end.
 
 
 %% -----------------------------------------------------------------------------
 %% @doc Returns the `erleans:grain_ref' for a Pid. This is more efficient than
 %% {@link erleans_grain:grain_ref} as it is not calling the grain (which might
-%% be busy handling signals) but using this module's ets table.
+%% be busy handling signals) for local grains but using this module's ets table.
+%%
+%% In case of a remote reference, this incurs in an RPC to the peer node's where
+%% the grain is activated.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec grain_ref(partisan:any_pid()) ->
     {ok, erleans:grain_ref()} | {error, timeout | any()}.
 
 grain_ref(Pid) when is_pid(Pid) ->
+    %% A local grain so we use the monitor table which is faster
     case ets:lookup(?MONITOR_TAB, Pid) of
         [{Pid, GrainRef, _}] ->
             {ok, GrainRef};
@@ -296,16 +285,17 @@ grain_ref(Pid) when is_pid(Pid) ->
     end;
 
 grain_ref(ProcRef) ->
-    %% Fail if this is not a partisan pid reference
+    %% We know this is not a pid so it must be a partisan process reference.
+    %% ProcRef can have 3 different serializations which are opaque, so we
+    %% check using its API.
     partisan:is_pid(ProcRef) orelse error({badarg, [ProcRef]}),
 
-    Peer = partisan:node(ProcRef),
-
-    case Peer == partisan:node() of
+    case partisan_remote_ref:is_local(ProcRef) of
         true ->
             grain_ref(partisan_remote_ref:to_term(ProcRef));
 
         false ->
+            Peer = partisan:node(ProcRef),
             case partisan_rpc:call(Peer, ?MODULE, grain_ref, [ProcRef], 5000) of
                 {badrpc, Reason} ->
                     {error, Reason};
@@ -323,6 +313,16 @@ grain_ref(ProcRef) ->
 -spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
 
 to_list() ->
+    to_list([safe]).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc
+%% @end
+%% -----------------------------------------------------------------------------
+-spec to_list([safe | unsafe]) -> [{grain_key(), partisan_remote_ref:p()}].
+
+to_list([Flag]) ->
     L = bondy_mst:fold(
         ?TREE,
         fun({GrainKey, Value}, Acc) ->
@@ -331,7 +331,7 @@ to_list() ->
                     Acc;
 
                 L ->
-                    case safe_pick(L) of
+                    case pick(L, undefined, [Flag]) of
                         undefined ->
                             Acc;
 
@@ -347,7 +347,7 @@ to_list() ->
 
 
 %% =============================================================================
-%% BONDY_MST_EXCHANGE CALLBACKS
+%% bondy_mst_grove CALLBACKS
 %% =============================================================================
 
 
@@ -393,7 +393,7 @@ broadcast_channel() ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec broadcast_data(bondy_mst_exchange:event()) ->
+-spec broadcast_data(bondy_mst_grove:event()) ->
     {MessageId :: any(), Payload :: any()}.
 
 broadcast_data(Event) ->
@@ -416,7 +416,7 @@ broadcast_data(Event) ->
 -spec merge(MessageId :: any(), Payload :: any()) -> boolean().
 
 merge(Event, undefined) ->
-    partisan_gen_server:call(?MODULE, {exchange_merge, Event}).
+    partisan_gen_server:call(?MODULE, {grove_merge, Event}).
 
 
 %% -----------------------------------------------------------------------------
@@ -430,7 +430,7 @@ merge(Event, undefined) ->
 -spec merge(Peer :: node(), MessageId :: any(), Payload :: any()) -> boolean().
 
 merge(Peer, Event, undefined) ->
-    partisan_gen_server:call({?MODULE, Peer}, {exchange_merge, Event}).
+    partisan_gen_server:call({?MODULE, Peer}, {grove_merge, Event}).
 
 
 %% -----------------------------------------------------------------------------
@@ -449,7 +449,7 @@ merge(Peer, Event, undefined) ->
 -spec is_stale(MessageId :: any()) -> boolean().
 
 is_stale(Event) ->
-    {Key, Value1} = bondy_mst_exchange:event_data(Event),
+    {Key, Value1} = bondy_mst_grove:event_data(Event),
 
     case bondy_mst:get(?TREE, Key) of
         undefined ->
@@ -481,7 +481,7 @@ is_stale(Event) ->
 
 graft({Event, undefined}) ->
     Tree = ?TREE,
-    {Key, Value1} = bondy_mst_exchange:event_data(Event),
+    {Key, Value1} = bondy_mst_grove:event_data(Event),
 
     case bondy_mst:get(Tree, Key) of
         undefined ->
@@ -526,7 +526,7 @@ exchange(Peer) ->
 -spec exchange(node(), map()) -> {ok, pid()} | {error, term()} | ignore.
 
 exchange(Peer, Opts) ->
-    case partisan_gen_server:call(?MODULE, {exchange_trigger, Peer, Opts}) of
+    case partisan_gen_server:call(?MODULE, {grove_trigger, Peer, Opts}) of
         ok ->
             %% We handle exchanges outselves so we return ignore
             ignore;
@@ -571,27 +571,34 @@ init(_) ->
 
     {channel, Channel} = lists:keyfind(channel, 1, partisan_gen:get_opts()),
 
-    %% We create an ets-based MST bound to this process.
-    %% The ets table will be garbage collected if this process terminates.
-    %% ets-based trees support read_concurrency so we can share the it using
-    %% persistent_term
-    Tree = bondy_mst:new(#{
-        store => bondy_mst_store:new(
-            bondy_mst_ets_store, [{name, ~"erleans_pm"}]
-        ),
-        merger => fun mst_value_merge/3
-    }),
 
-    ok = persistent_term:put(?PERSISTENT_KEY, Tree),
+
+
 
     %% We wrap the tree using the exchange module
     Node = partisan:node(),
-    Opts = #{callback_mod => ?MODULE, max_merges => 3, max_same_merge => 1},
-    {ok, ExchangeState} = bondy_mst_exchange:init(Node, Tree, Opts),
+    Opts = #{
+        store => bondy_mst_store:new(
+            bondy_mst_ets_store, [{name, ~"erleans_pm"}]
+        ),
+        merger => fun mst_value_merge/3,
+        callback_mod => ?MODULE,
+        max_merges => 3,
+        max_same_merge => 1
+    },
+
+    %% We create an ets-based MST bound to this process.
+    %% The ets table will be garbage collected if this process terminates.
+    Grove = bondy_mst_grove:new(Node, Opts),
+    Tree = bondy_mst_grove:tree(Grove),
+
+    %% ets-based trees support read_concurrency so we can share the it using
+    %% persistent_term
+    ok = persistent_term:put(?PERSISTENT_KEY, Tree),
 
     State = #state{
-        partisan_channel = Channel,
-        exchange_state = ExchangeState
+        grove = Grove,
+        partisan_channel = Channel
     },
 
     {ok, State, {continue, monitor_existing}}.
@@ -709,8 +716,8 @@ handle_call({unregister_name, _}, _From, State) ->
 %%         end,
 %%     {reply, Reply, State};
 
-handle_call({exchange_merge, Event}, _From, State) ->
-    ES = bondy_mst_exchange:handle(Event, State#state.exchange_state),
+handle_call({grove_merge, Event}, _From, State) ->
+    ES = bondy_mst_grove:handle(State#state.grove, Event),
     %% Required by Plumtree, but not sure we need this as bondy_mst.
     %% Merges a remote copy of an object record sent via broadcast w/ the
     %% local view for the key contained in the message id. If the remote copy is
@@ -718,12 +725,12 @@ handle_call({exchange_merge, Event}, _From, State) ->
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
     %% generating siblings) and `true' is returned.
     Reply = true,
-    {reply, Reply, State#state{exchange_state = ES}};
+    {reply, Reply, State#state{grove = ES}};
 
-handle_call({exchange_trigger, Peer, _Opts}, _From, State) ->
-    ES = bondy_mst_exchange:trigger(Peer, State#state.exchange_state),
+handle_call({grove_trigger, Peer, _Opts}, _From, State) ->
+    ES = bondy_mst_grove:trigger(State#state.grove, Peer),
     Reply = ok,
-    {reply, Reply, State#state{exchange_state = ES}};
+    {reply, Reply, State#state{grove = ES}};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -733,8 +740,8 @@ handle_call(_Request, _From, State) ->
     {noreply, NewState :: t()}.
 
 handle_cast({exchange_message, Message}, State) ->
-    ES = bondy_mst_exchange:handle(Message, State#state.exchange_state),
-    {noreply, State#state{exchange_state = ES}};
+    ES = bondy_mst_grove:handle(State#state.grove, Message),
+    {noreply, State#state{grove = ES}};
 
 handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
@@ -788,10 +795,10 @@ terminate(_Reason, State) ->
 
 
 %% @private
-mst_put(#state{exchange_state = ES0} = State, Key, Value) ->
+mst_put(#state{grove = Grove0} = State, Key, Value) ->
     %% This will broadcast the change to peers
-    ES = bondy_mst_exchange:put(Key, Value, ES0),
-    State#state{exchange_state = ES}.
+    Grove = bondy_mst_grove:put(Grove0, Key, Value),
+    State#state{grove = Grove}.
 
 
 %% @private
@@ -898,6 +905,7 @@ do_unregister_name(State0, GrainRef, Pid) when is_pid(Pid) ->
         undefined ->
             %% SHOULD NOT HAPPEN
             ok;
+
         MVRegister ->
             ProcRef = partisan_remote_ref:from_term(Pid),
             {ok, Value} = state_type:mutate(
@@ -974,6 +982,7 @@ lookup({_, _} = GrainKey) ->
     case bondy_mst:get(?TREE, GrainKey) of
         undefined ->
             [];
+
         MVRegister ->
             sort_conflicting_values(MVRegister)
     end.
@@ -1037,28 +1046,32 @@ whereis_stateless(GrainRef) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-safe_pick(L) ->
-    safe_pick(L, undefined).
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
-safe_pick([], _) ->
+pick([], _, _) ->
     undefined;
 
-safe_pick([ProcRef | Rest], GrainRef) ->
-    try is_proc_alive(ProcRef, GrainRef) of
+pick(L, GrainRef, []) ->
+    pick(L, GrainRef, [unsafe]);
+
+pick([H], _, [unsafe]) ->
+    H;
+
+pick([H | _], _, [unsafe]) ->
+    H;
+
+pick([H | T], GrainRef, [safe]) ->
+    try is_proc_alive(H, GrainRef) of
         true ->
-            ProcRef;
+            H;
+
         false ->
-            safe_pick(Rest, GrainRef)
+            pick(T, GrainRef, [safe])
+
     catch
         error:_ ->
-            safe_pick(Rest, GrainRef)
+            pick(T, GrainRef, [safe])
     end.
+
+
 
 
 %% -----------------------------------------------------------------------------
