@@ -95,7 +95,7 @@
     exchange_state   :: bondy_mst_exchange:t()
 }).
 
-
+-type t() :: #state{}.
 -type grain_key() :: {GrainId :: any(), ImplMod :: module()}.
 
 %% API
@@ -288,11 +288,11 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
 
 grain_ref(Pid) when is_pid(Pid) ->
     case ets:lookup(?MONITOR_TAB, Pid) of
-        [] ->
-            {error, not_found};
-
         [{Pid, GrainRef, _}] ->
-            {ok, GrainRef}
+            {ok, GrainRef};
+
+        [] ->
+            {error, not_found}
     end;
 
 grain_ref(ProcRef) ->
@@ -357,6 +357,7 @@ send(Peer, Message) ->
 
 
 broadcast(Event) ->
+    ?LOG_INFO("Broadcasting event ~p", [Event]),
     partisan:broadcast(Event, ?MODULE).
 
 
@@ -543,7 +544,7 @@ exchange(Peer, Opts) ->
 
 
 
--spec init(Args :: term()) -> {ok, State :: term()}.
+-spec init(Args :: term()) -> {ok, State :: t()}.
 
 init(_) ->
     %% Trap exists otherwise terminate/1 won't be called when shutdown by
@@ -574,10 +575,12 @@ init(_) ->
     %% The ets table will be garbage collected if this process terminates.
     %% ets-based trees support read_concurrency so we can share the it using
     %% persistent_term
-    TreeStore = bondy_mst_store:new(
-        bondy_mst_ets_store, [{name, ~"erleans_pm"}]
-    ),
-    Tree = bondy_mst:new(#{store => TreeStore, merger => fun mst_merge/3}),
+    Tree = bondy_mst:new(#{
+        store => bondy_mst_store:new(
+            bondy_mst_ets_store, [{name, ~"erleans_pm"}]
+        ),
+        merger => fun mst_value_merge/3
+    }),
 
     ok = persistent_term:put(?PERSISTENT_KEY, Tree),
 
@@ -594,44 +597,43 @@ init(_) ->
     {ok, State, {continue, monitor_existing}}.
 
 
-handle_continue(monitor_existing, State) ->
+handle_continue(monitor_existing, State0) ->
     %% This prevents any grain to be registered as we are blocking the server
     %% until we finish.
-    %% We fold the claimed ?MONITOR_TAB table to find any existing registrations.
-    %% In case the table is new, it would be empty. Otherwise, we would iterate
-    %% over registrations that were registered by a previous instance of this
-    %% gen_server before it crashed.
-    %% We re-monitor alive pids and remove dead ones.
+    %% We fold the claimed ?MONITOR_TAB table to find any existing
+    %% registrations. In case the table is new, it would be empty. Otherwise, we
+    %% would iterate over registrations that were registered by a previous
+    %% instance of this server before it crashed.
+    %% We re-register/monitor alive pids and remove dead ones.
     Fun = fun
-        ({Pid, GrainRef, _OldRef}) ->
+        ({Pid, GrainRef, _OldMRef}, Acc0) ->
             case erlang:is_process_alive(Pid) of
                 true ->
                     %% The process is still alive, but the monitor has died with
                     %% the previous instance of this gen_server, so we monitor
                     %% again. We use relaxed mode which allows us to update the
-                    %% existing registration on the 3 tables, ?MONITOR_TAB,
-                    %% ?VIEW_TAB and ?PDB_PREFIX.
-                    ok = do_register_name(GrainRef, Pid, relaxed);
+                    %% existing registration on ?MONITOR_TAB and the MST.
+                    {_, Acc} = do_register_name(Acc0, GrainRef, Pid, relaxed),
+                    Acc;
+
                 false ->
                     %% THe process has died, so we unregister. This will also
-                    %% remove the registration from the global table (bondy_mst).
-                    ok = do_unregister_name(GrainRef, Pid)
-            end;
-
-        ({_, _, _, _}) ->
-            ok
+                    %% remove the registration from the MST.
+                    {_, Acc} = do_unregister_name(Acc0, GrainRef, Pid),
+                    Acc
+            end
     end,
-    ok = lists:foreach(Fun, ets:tab2list(?MONITOR_TAB)),
+    State = lists:foldl(Fun, State0, ets:tab2list(?MONITOR_TAB)),
 
     %% We should now have all existing local grains re-registered on this
-    %% server and gossip messages sent to cluster peers.
+    %% server and broadcast messages sent to cluster peers.
     {noreply, State};
 
 handle_continue(_, State) ->
     {noreply, State}.
 
 
-handle_call({register_name, GrainRef}, {Caller, _}, State)
+handle_call({register_name, GrainRef}, {Caller, _}, State0)
 when is_pid(Caller) ->
     %% This call can only be made locally, so if Caller is not a pid it would be
     %% a partisan:pid() and thus we will match the fallback clause returning an
@@ -642,18 +644,20 @@ when is_pid(Caller) ->
     Processes = lookup(GrainRef),
 
     %% We then exclude unreachable grains
-    Reply = case exclude_unreachable(Processes) of
-        [] ->
-            %% Nothing registered or all unreachable, so we allow the local
-            %% registration
-            do_register_name(GrainRef, Caller);
+    {Reply, State} =
+        case exclude_unreachable(Processes) of
+            [] ->
+                %% Nothing registered or all unreachable, so we allow the local
+                %% registration
+                do_register_name(State0, GrainRef, Caller);
 
-        [ProcRef|_] ->
-            %% We found at least one active grain that is reachable, so we pick
-            %% it. If there was a local grain registered under GrainRef,
-            %% ProcRef would be it (becuase of ordering guarantee).
-            {error, {already_in_use, ProcRef}}
-    end,
+            [ProcRef|_] ->
+                %% We found at least one active grain that is reachable, so we
+                %% pick it. If there was a local grain registered under GrainRef,
+                %% ProcRef would be it (becuase of ordering guarantee).
+                Error = {error, {already_in_use, ProcRef}},
+                {Error, State0}
+        end,
 
     {reply, Reply, State};
 
@@ -661,9 +665,9 @@ handle_call({register_name, _}, _From, State) ->
     %% A call from a remote node, now allowed
     {reply, {error, not_local}, State};
 
-handle_call({unregister_name, GrainRef}, {Caller, _}, State)
+handle_call({unregister_name, GrainRef}, {Caller, _}, State0)
 when is_pid(Caller) ->
-    Reply = do_unregister_name(GrainRef, Caller),
+    {Reply, State} = do_unregister_name(State0, GrainRef, Caller),
     {reply, Reply, State};
 
 handle_call({unregister_name, _}, _From, State) ->
@@ -725,31 +729,31 @@ handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 
--spec handle_cast(Request :: term(), State :: term()) ->
-    {noreply, NewState :: term()}.
+-spec handle_cast(Request :: term(), State :: t()) ->
+    {noreply, NewState :: t()}.
 
 handle_cast({exchange_message, Message}, State) ->
     ES = bondy_mst_exchange:handle(Message, State#state.exchange_state),
     {noreply, State#state{exchange_state = ES}};
 
-handle_cast({force_unregister_name, GrainRef, ProcRef}, State) ->
+handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
     case partisan_remote_ref:is_local(ProcRef) of
         true ->
             Pid = partisan_remote_ref:to_pid(ProcRef),
-            do_unregister_name(GrainRef, Pid);
+            {_, State} = do_unregister_name(State0, GrainRef, Pid),
+            {noreply, State};
 
         false ->
-            ok
-    end,
-    {noreply, State};
+         {noreply, State0}
+    end;
 
 handle_cast(_Request, State) ->
     {noreply, State}.
 
 
--spec handle_info(Message :: term(), State :: term()) ->
-    {noreply, NewState :: term()}.
+-spec handle_info(Message :: term(), State :: t()) ->
+    {noreply, NewState :: t()}.
 
 handle_info({nodedown, _Node}, State) ->
     {noreply, State};
@@ -757,23 +761,23 @@ handle_info({nodedown, _Node}, State) ->
 handle_info({nodeup, _Node}, State) ->
     {noreply, State};
 
-handle_info({'DOWN', MRef, process, Pid, _}, State) ->
+handle_info({'DOWN', MRef, process, Pid, _}, State0) ->
     ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
-    ok = do_unregister_name(Pid),
+    {_, State} = do_unregister_name(State0, Pid),
     {noreply, State};
-
 
 handle_info(_, State) ->
     {noreply, State}.
 
 
--spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-    State :: term()) ->
-    term().
+-spec terminate(
+    Reason :: (normal | shutdown | {shutdown, term()} | term()),
+    State :: t()) -> ok.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    ok = unregister_all(State),
     _ = persistent_term:erase(?PERSISTENT_KEY),
-    ok = unregister_all().
+    ok.
 
 
 
@@ -783,9 +787,16 @@ terminate(_Reason, _State) ->
 
 
 
-mst_merge(_Key, A, B) ->
-    state_mvregister:merge(A, B).
+%% @private
+mst_put(#state{exchange_state = ES0} = State, Key, Value) ->
+    %% This will broadcast the change to peers
+    ES = bondy_mst_exchange:put(Key, Value, ES0),
+    State#state{exchange_state = ES}.
 
+
+%% @private
+mst_value_merge(_Key, A, B) ->
+    state_mvregister:merge(A, B).
 
 
 sort_conflicting_values(MVRegister) ->
@@ -818,11 +829,11 @@ sort_conflicting_values(MVRegister) ->
 %% The call
 %% @end
 %% -----------------------------------------------------------------------------
--spec do_register_name(GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
-    ok | {error, {already_in_use, partisan_remote_ref:p()}}.
+-spec do_register_name(t(), GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
+    {ok, t()} | {{error, {already_in_use, partisan_remote_ref:p()}}, t()}.
 
-do_register_name(GrainRef, Pid) ->
-    do_register_name(GrainRef, Pid, strict).
+do_register_name(State, GrainRef, Pid) ->
+    do_register_name(State, GrainRef, Pid, strict).
 
 
 %% -----------------------------------------------------------------------------
@@ -833,10 +844,10 @@ do_register_name(GrainRef, Pid) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec do_register_name(
-    GrainRef :: erleans:grain_ref(), Pid :: pid(), strict | relaxed) ->
-    ok | {error, {already_in_use, partisan_remote_ref:p()}}.
+    t(), GrainRef :: erleans:grain_ref(), Pid :: pid(), strict | relaxed) ->
+    {ok, t()} | {{error, {already_in_use, partisan_remote_ref:p()}}, t()}.
 
-do_register_name(GrainRef, Pid, Mode) when is_pid(Pid) ->
+do_register_name(State0, GrainRef, Pid, Mode) when is_pid(Pid) ->
     case monitor(GrainRef, Pid, Mode) of
         ok ->
             Key = grain_key(GrainRef),
@@ -844,11 +855,11 @@ do_register_name(GrainRef, Pid, Mode) when is_pid(Pid) ->
             {ok, Value} = state_type:mutate(
                 {set, 0, ProcRef}, partisan:node(), state_mvregister:new()
             ),
-            _Tree = bondy_mst:insert(?TREE, Key, Value),
-            ok;
+            State = mst_put(State0, Key, Value),
+            {ok, State};
 
         {error, _} = Error ->
-            Error
+            {Error, State0}
     end.
 
 
@@ -857,14 +868,14 @@ do_register_name(GrainRef, Pid, Mode) when is_pid(Pid) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec do_unregister_name(Pid :: pid()) -> true.
+-spec do_unregister_name(t(), Pid :: pid()) -> {ok, t()}.
 
-do_unregister_name(Pid) when is_pid(Pid) ->
+do_unregister_name(State0, Pid) when is_pid(Pid) ->
     case ets:lookup(?MONITOR_TAB, Pid) of
         [{Pid, GrainRef, _}] ->
-            ok = do_unregister_name(GrainRef, Pid);
+            do_unregister_name(State0, GrainRef, Pid);
         _ ->
-            ok
+            {ok, State0}
     end.
 
 
@@ -873,14 +884,14 @@ do_unregister_name(Pid) when is_pid(Pid) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec do_unregister_name(GrainRef :: erleans:grain_ref(), Pid :: pid()) -> true.
+-spec do_unregister_name(t(), GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
+    {ok, t()}.
 
-do_unregister_name(GrainRef, Pid) when is_pid(Pid) ->
+do_unregister_name(State0, GrainRef, Pid) when is_pid(Pid) ->
     %% Demonitor
     ok = demonitor(Pid),
     true = ets:delete(?MONITOR_TAB, Pid),
 
-    %% Insert TOMBSTONE
     Key = grain_key(GrainRef),
 
     case bondy_mst:get(?TREE, Key) of
@@ -892,8 +903,8 @@ do_unregister_name(GrainRef, Pid) when is_pid(Pid) ->
             {ok, Value} = state_type:mutate(
                 {set, 0, ProcRef}, ?TOMBSTONE, MVRegister
             ),
-            _Tree = bondy_mst:insert(?TREE, Key, Value),
-            ok
+            State = mst_put(State0, Key, Value),
+            {ok, State}
     end.
 
 
@@ -917,6 +928,7 @@ monitor(GrainRef, Pid, strict) when is_pid(Pid) ->
     case ets:insert_new(?MONITOR_TAB, {Pid, GrainRef, Mref}) of
         true ->
             ok;
+
         false ->
             true = erlang:demonitor(Mref, [flush]),
             [{OtherPid, GrainRef, _}] = ets:lookup(?MONITOR_TAB, Pid),
@@ -939,6 +951,7 @@ demonitor(Pid) ->
         [{Pid, _, Mref}] ->
             true = erlang:demonitor(Mref, [flush]),
             ok;
+
         [] ->
             ok
     end.
@@ -1113,28 +1126,43 @@ is_reachable(ProcRef) ->
 
 
 %% -----------------------------------------------------------------------------
+%% @private
 %% @doc Unregisters all local alive processes.
 %% @end
 %% -----------------------------------------------------------------------------
--spec unregister_all() -> ok.
+-spec unregister_all(t()) -> ok.
 
-unregister_all() ->
+unregister_all(State) ->
     true = ets:safe_fixtable(?MONITOR_TAB, true),
-    unregister_all(ets:first(?MONITOR_TAB)).
+    try
+        unregister_all(State, ets:first(?MONITOR_TAB))
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_ERROR(#{
+                message => "Unexpected error",
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+            ok
+    after
+        true = ets:safe_fixtable(?MONITOR_TAB, false)
+    end.
 
-unregister_all(Pid) when is_pid(Pid) ->
+
+%% @private
+unregister_all(State0, Pid) when is_pid(Pid) ->
     %% {Pid, GrainRef, MRef}
     GrainRef = ets:lookup_element(?MONITOR_TAB, Pid, 2),
-    ok = do_unregister_name(GrainRef, Pid),
-    unregister_all(ets:next(?MONITOR_TAB, Pid));
+    {ok, State} = do_unregister_name(State0, GrainRef, Pid),
+    unregister_all(State, ets:next(?MONITOR_TAB, Pid));
 
-unregister_all(#{id := _} = GrainRef) ->
-    %% Ignore as we have two entries per registration
-    %% {Pid, GrainRef} and {GrainRef, Pid}, we just use the first
-    unregister_all(ets:next(?MONITOR_TAB, GrainRef));
+%% unregister_all(State, #{id := _} = GrainRef) ->
+%%     %% Ignore as we have two entries per registration
+%%     %% {Pid, GrainRef} and {GrainRef, Pid}, we just use the first
+%%     unregister_all(State, ets:next(?MONITOR_TAB, GrainRef));
 
-unregister_all('$end_of_table') ->
-    true = ets:safe_fixtable(?MONITOR_TAB, false),
+unregister_all(_, '$end_of_table') ->
     ok.
 
 
