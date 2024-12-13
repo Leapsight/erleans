@@ -96,7 +96,7 @@
 -export([grain_ref/1]).
 -export([to_list/0]).
 
-%% BONDY_MSRT_GROVE CALLBACKS
+%% BONDY_MST_GROVE CALLBACKS
 -export([send/2]).
 -export([broadcast/1]).
 -export([on_merge/1]).
@@ -347,13 +347,13 @@ to_list([Flag]) ->
 
 
 %% =============================================================================
-%% bondy_mst_grove CALLBACKS
+%% BONDY_MST_GROVE CALLBACKS
 %% =============================================================================
 
 
 
 send(Peer, Message) ->
-    partisan_gen_server:cast({?MODULE, Peer}, {exchange_message, Message}).
+    partisan_gen_server:cast({?MODULE, Peer}, {grove_message, Message}).
 
 
 broadcast(Event) ->
@@ -362,7 +362,7 @@ broadcast(Event) ->
 
 
 on_merge(_Page) ->
-    %% We do nothing as we are using the MST as the store itself.
+    %% @TODO stop grains that are no longer here to be re-registered via a sync
     ok.
 
 
@@ -393,7 +393,7 @@ broadcast_channel() ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec broadcast_data(bondy_mst_grove:event()) ->
+-spec broadcast_data(bondy_mst_grove:gossip()) ->
     {MessageId :: any(), Payload :: any()}.
 
 broadcast_data(Event) ->
@@ -416,6 +416,7 @@ broadcast_data(Event) ->
 -spec merge(MessageId :: any(), Payload :: any()) -> boolean().
 
 merge(Event, undefined) ->
+    %% @TODO stop grains that are no longer here to be re-registered via a sync
     partisan_gen_server:call(?MODULE, {grove_merge, Event}).
 
 
@@ -449,10 +450,12 @@ merge(Peer, Event, undefined) ->
 -spec is_stale(MessageId :: any()) -> boolean().
 
 is_stale(Event) ->
-    {Key, Value1} = bondy_mst_grove:event_data(Event),
+    {Key, Value1} = bondy_mst_grove:gossip_data(Event),
 
     case bondy_mst:get(?TREE, Key) of
         undefined ->
+            %% @TODO Maybe stop grains that are no longer here to be
+            %% re-registered via a sync. Can we do this here?
             false;
 
         Value0 ->
@@ -481,7 +484,7 @@ is_stale(Event) ->
 
 graft({Event, undefined}) ->
     Tree = ?TREE,
-    {Key, Value1} = bondy_mst_grove:event_data(Event),
+    {Key, Value1} = bondy_mst_grove:gossip_data(Event),
 
     case bondy_mst:get(Tree, Key) of
         undefined ->
@@ -523,17 +526,10 @@ exchange(Peer) ->
 %% @doc Triggers an exchange.
 %% @end
 %% -----------------------------------------------------------------------------
--spec exchange(node(), map()) -> {ok, pid()} | {error, term()} | ignore.
+-spec exchange(node(), map()) -> ok | {error, term()}.
 
 exchange(Peer, Opts) ->
-    case partisan_gen_server:call(?MODULE, {grove_trigger, Peer, Opts}) of
-        ok ->
-            %% We handle exchanges outselves so we return ignore
-            ignore;
-
-        {error, _} = Error ->
-            Error
-    end.
+    partisan_gen_server:call(?MODULE, {grove_trigger, Peer, Opts}).
 
 
 
@@ -681,43 +677,8 @@ handle_call({unregister_name, _}, _From, State) ->
     %% A call from a remote node, now allowed
     {reply, {error, not_local}, State};
 
-%% handle_call({register_name_test, GrainRef, ProcRef}, _From, State) ->
-%%     %% Only for testing (se export of register_name/2)
-%%     %% Add to local materialised view
-%%     Node = partisan:node(ProcRef),
-
-%%     Reply =
-%%         case Node == partisan:node() of
-%%             true ->
-%%                 Pid = partisan_remote_ref:to_pid(ProcRef),
-%%                 do_register_name(GrainRef, Pid);
-%%             false ->
-%%                 Key = {Node, grain_key(GrainRef)},
-%%                 ok = plum_db:put(?PDB_PREFIX, Key, ProcRef)
-%%         end,
-%%     {reply, Reply, State};
-
-%% handle_call({unregister_name_test, GrainRef, ProcRef}, _From, State) ->
-%%     %% Only for testing (se export of unregister_name/2)
-%%     Node = partisan:node(ProcRef),
-
-%%     Reply =
-%%         case Node == partisan:node() of
-%%             true ->
-%%                 do_unregister_name(
-%%                     GrainRef, partisan_remote_ref:to_pid(ProcRef)
-%%                 );
-
-%%             false ->
-%%                 %% We simulate a remote registration
-%%                 %% Remove to globally replicated table
-%%                 Key = {Node, grain_key(GrainRef)},
-%%                 ok = plum_db:delete(?PDB_PREFIX, Key)
-%%         end,
-%%     {reply, Reply, State};
-
 handle_call({grove_merge, Event}, _From, State) ->
-    ES = bondy_mst_grove:handle(State#state.grove, Event),
+    Grove = bondy_mst_grove:handle(State#state.grove, Event),
     %% Required by Plumtree, but not sure we need this as bondy_mst.
     %% Merges a remote copy of an object record sent via broadcast w/ the
     %% local view for the key contained in the message id. If the remote copy is
@@ -725,12 +686,11 @@ handle_call({grove_merge, Event}, _From, State) ->
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
     %% generating siblings) and `true' is returned.
     Reply = true,
-    {reply, Reply, State#state{grove = ES}};
+    {reply, Reply, State#state{grove = Grove}};
 
 handle_call({grove_trigger, Peer, _Opts}, _From, State) ->
-    ES = bondy_mst_grove:trigger(State#state.grove, Peer),
-    Reply = ok,
-    {reply, Reply, State#state{grove = ES}};
+    Reply = bondy_mst_grove:trigger(State#state.grove, Peer),
+    {reply, Reply, State};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -738,10 +698,6 @@ handle_call(_Request, _From, State) ->
 
 -spec handle_cast(Request :: term(), State :: t()) ->
     {noreply, NewState :: t()}.
-
-handle_cast({exchange_message, Message}, State) ->
-    ES = bondy_mst_grove:handle(State#state.grove, Message),
-    {noreply, State#state{grove = ES}};
 
 handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
@@ -754,6 +710,10 @@ handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
         false ->
          {noreply, State0}
     end;
+
+handle_cast({grove_message, Msg}, State) ->
+    Grove = bondy_mst_grove:handle(State#state.grove, Msg),
+    {noreply, State#state{grove = Grove}};
 
 handle_cast(_Request, State) ->
     {noreply, State}.
