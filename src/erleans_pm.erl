@@ -692,6 +692,15 @@ handle_call({grove_trigger, Peer, _Opts}, _From, State) ->
     Reply = bondy_mst_grove:trigger(State#state.grove, Peer),
     {reply, Reply, State};
 
+handle_call({register_name_test, GrainRef, ProcRef}, _From, State0) ->
+    %% Used for testing only
+    {Reply, State} = do_register_name_test(State0, GrainRef, ProcRef),
+    {reply, Reply, State};
+
+handle_call({unregister_name_test, GrainRef, ProcRef}, _From, State) ->
+    {Reply, State} = do_unregister_name_test(State0, GrainRef, Caller),
+    {reply, Reply, State};
+
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -831,6 +840,25 @@ do_register_name(State0, GrainRef, Pid, Mode) when is_pid(Pid) ->
     end.
 
 
+%% Used for testing only (see export of register_name/2)
+do_register_name_test(State0, GrainRef, ProcRef) ->
+    Node = partisan:node(ProcRef),
+
+    case Node == partisan:node() of
+        true ->
+            Pid = partisan_remote_ref:to_pid(ProcRef),
+            do_register_name(State0, GrainRef, Pid);
+
+        false ->
+            Key = grain_key(GrainRef),
+            {ok, Value} = state_type:mutate(
+                {set, 0, ProcRef}, Node, state_mvregister:new()
+            ),
+            State = mst_put(State0, Key, Value),
+            {ok, State}
+    end.
+
+
 %% -----------------------------------------------------------------------------
 %% @private
 %% @doc
@@ -876,6 +904,23 @@ do_unregister_name(State0, GrainRef, Pid) when is_pid(Pid) ->
             {ok, State}
     end.
 
+
+do_unregister_name_test(State0, GrainRef, ProcRef) ->
+    Node = partisan:node(ProcRef),
+
+    case Node == partisan:node() of
+        true ->
+            Pid = partisan_remote_ref:to_pid(ProcRef),
+            do_unregister_name(State0, GrainRef, Pid);
+
+        false ->
+            Key = grain_key(GrainRef),
+            {ok, Value} = state_type:mutate(
+                {set, 0, ?TOMBSTONE}, Node, state_mvregister:new()
+            ),
+            State = mst_put(State0, Key, Value),
+            {ok, State}
+    end.
 
 %% -----------------------------------------------------------------------------
 %% @private
