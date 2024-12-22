@@ -728,7 +728,8 @@ handle_info({nodedown, _Node}, State) ->
 handle_info({nodeup, _Node}, State) ->
     {noreply, State};
 
-handle_info({'DOWN', MRef, process, Pid, _}, State0) ->
+handle_info({'DOWN', MRef, process, Pid, _Info}, State0) ->
+    %% Local grain exit
     ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
     {_, State} = do_unregister_name(State0, Pid),
     {noreply, State};
