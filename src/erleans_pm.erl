@@ -870,7 +870,7 @@ do_unregister_name(State0, GrainRef, Pid) when is_pid(Pid) ->
         MVRegister ->
             ProcRef = partisan_remote_ref:from_term(Pid),
             {ok, Value} = state_type:mutate(
-                {set, 0, ProcRef}, ?TOMBSTONE, MVRegister
+                {set, 0, ?TOMBSTONE}, partisan:node(), MVRegister
             ),
             State = mst_put(State0, Key, Value),
             {ok, State}
