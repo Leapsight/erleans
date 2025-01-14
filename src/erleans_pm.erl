@@ -56,6 +56,12 @@
 %% A local registered grain `DOWN` signal is received.
 %% </li>
 %% </ul>
+%%
+%% == Garbage Collection ==
+%% * Tombstones are not garbage collected but this is not a major problem as we
+%% use the `grain_ref()' as key for the MST, so the size of the MST is always
+%% bounded to the max number of grains that ever existed. In the near future we
+%% will support tombstone removal.
 %% @end
 %% -----------------------------------------------------------------------------
 -module(erleans_pm).
@@ -70,7 +76,6 @@
 -define(PERSISTENT_KEY, {?MODULE, tree}).
 -define(TREE, persistent_term:get(?PERSISTENT_KEY)).
 -define(MONITOR_TAB, erleans_pm_monitor).
--define(TOMBSTONE, '$deleted').
 
 %% This server may receive a huge amount of messages.
 %% We make sure that they are stored off heap to avoid excessive GCs.
@@ -95,11 +100,13 @@
 -export([whereis_name/2]).
 -export([grain_ref/1]).
 -export([to_list/0]).
+-export([lookup/1]).
 
 %% BONDY_MST_GROVE CALLBACKS
 -export([send/2]).
 -export([broadcast/1]).
 -export([on_merge/1]).
+-export([on_update/2]).
 
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
 -export([broadcast_data/1]).
@@ -120,9 +127,11 @@
 
 %% TEST API
 -ifdef(TEST).
-    -export([register_name/2]).
-    -export([unregister_name/2]).
-    -dialyzer({nowarn_function, register_name/2}).
+    -export([add_/2]).
+    -export([remove_/2]).
+    -export([register_name_/2]).
+    -export([unregister_name_/2]).
+    -dialyzer({nowarn_function, register_name_/2}).
 -endif.
 
 -dialyzer({nowarn_function, register_name/0}).
@@ -183,13 +192,12 @@ register_name() ->
 %% This call is serialised through the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
--spec unregister_name() ->
-    ok | {error, badgrain | not_owner}.
+-spec unregister_name() -> ok | {error, badgrain}.
 
 unregister_name() ->
     %% Gets the calling process grain_ref
     case erleans:grain_ref() of
-        true ->
+        undefined ->
             {error, badgrain};
 
         GrainRef ->
@@ -227,8 +235,7 @@ whereis_name(GrainRef) ->
 %% remote call. If there is no connection to the node in which the
 %% process lives, it is deemed dead.
 %%
-%%
-%% If Opts is `[]` or `[unsafe]` it will not check for liveness.
+%% If Opts is `[]` or `[unsafe]` the function will not check for liveness.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec whereis_name(GrainRef :: erleans:grain_ref(), Opts :: [safe | unsafe]) ->
@@ -261,6 +268,26 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
             pick(ProcRefs, GrainRef, [Flag])
     end.
 
+
+%% -----------------------------------------------------------------------------
+%% @doc Lookups all the registered grains under name `GrainRef' using the
+%% local ets-based materialised view.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec lookup(GrainRef :: erleans:grain_ref() | grain_key()) ->
+    [partisan_remote_ref:p()].
+
+lookup(#{id := _} = GrainRef) ->
+    lookup(grain_key(GrainRef));
+
+lookup({_, _} = GrainKey) ->
+    case bondy_mst:get(?TREE, GrainKey) of
+        undefined ->
+            [];
+
+        AWSet ->
+            sort_conflicting_values(AWSet)
+    end.
 
 %% -----------------------------------------------------------------------------
 %% @doc Returns the `erleans:grain_ref' for a Pid. This is more efficient than
@@ -307,7 +334,7 @@ grain_ref(ProcRef) ->
 
 
 %% -----------------------------------------------------------------------------
-%% @doc
+%% @doc The same as calling `to_list([safe])'.
 %% @end
 %% -----------------------------------------------------------------------------
 -spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
@@ -326,7 +353,7 @@ to_list([Flag]) ->
     L = bondy_mst:fold(
         ?TREE,
         fun({GrainKey, Value}, Acc) ->
-            case sets:to_list(state_mvregister:query(Value)) of
+            case sets:to_list(state_awset:query(Value)) of
                 [] ->
                     Acc;
 
@@ -361,8 +388,12 @@ broadcast(Event) ->
     partisan:broadcast(Event, ?MODULE).
 
 
-on_merge(_Page) ->
-    %% @TODO stop grains that are no longer here to be re-registered via a sync
+on_merge(Page) ->
+    %% @TODO remove local references that are no longer active
+    partisan_gen_server:cast(?MODULE, {grove_on_merge, Page}).
+
+
+on_update(_Key, _Value0) ->
     ok.
 
 
@@ -480,7 +511,7 @@ is_stale(Event) ->
 %% @end
 %% -----------------------------------------------------------------------------
 -spec graft(MessageId :: any()) ->
-    stale | {ok, state_mvregister:state_mvregister()} | {error, term()}.
+    stale | {ok, state_awset:state_awset()} | {error, term()}.
 
 graft({Event, undefined}) ->
     Tree = ?TREE,
@@ -567,17 +598,13 @@ init(_) ->
 
     {channel, Channel} = lists:keyfind(channel, 1, partisan_gen:get_opts()),
 
-
-
-
-
     %% We wrap the tree using the exchange module
     Node = partisan:node(),
     Opts = #{
-        store => bondy_mst_store:new(
-            bondy_mst_ets_store, [{name, ~"erleans_pm"}]
+        store => bondy_mst_store:open(
+            bondy_mst_ets_store, [{name, <<"erleans_pm">>}]
         ),
-        merger => fun mst_value_merge/3,
+        merger => fun mst_merge_value/3,
         callback_mod => ?MODULE,
         max_merges => 3,
         max_same_merge => 1
@@ -605,7 +632,7 @@ handle_continue(monitor_existing, State0) ->
     %% until we finish.
     %% We fold the claimed ?MONITOR_TAB table to find any existing
     %% registrations. In case the table is new, it would be empty. Otherwise, we
-    %% would iterate over registrations that were registered by a previous
+    %% would iterate over registrations that were done by a previous
     %% instance of this server before it crashed.
     %% We re-register/monitor alive pids and remove dead ones.
     Fun = fun
@@ -620,7 +647,7 @@ handle_continue(monitor_existing, State0) ->
                     Acc;
 
                 false ->
-                    %% THe process has died, so we unregister. This will also
+                    %% The process has died, so we unregister. This will also
                     %% remove the registration from the MST.
                     {_, Acc} = do_unregister_name(Acc0, GrainRef, Pid),
                     Acc
@@ -697,9 +724,20 @@ handle_call({register_name_test, GrainRef, ProcRef}, _From, State0) ->
     {Reply, State} = do_register_name_test(State0, GrainRef, ProcRef),
     {reply, Reply, State};
 
-handle_call({unregister_name_test, GrainRef, ProcRef}, _From, State) ->
-    {Reply, State} = do_unregister_name_test(State0, GrainRef, Caller),
+handle_call({unregister_name_test, GrainRef, ProcRef}, _From, State0) ->
+    %% Used for testing only
+    {Reply, State} = do_unregister_name_test(State0, GrainRef, ProcRef),
     {reply, Reply, State};
+
+handle_call({add_test, GrainRef, ProcRef}, _From, State0) ->
+    %% Used for testing only
+    State = add(State0, GrainRef, ProcRef, partisan_remote_ref:node(ProcRef)),
+    {reply, ok, State};
+
+handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
+    %% Used for testing only
+    State = remove(State0, GrainRef, ProcRef, partisan_remote_ref:node(ProcRef)),
+    {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -724,6 +762,14 @@ handle_cast({grove_message, Msg}, State) ->
     Grove = bondy_mst_grove:handle(State#state.grove, Msg),
     {noreply, State#state{grove = Grove}};
 
+handle_cast({grove_on_merge, Page}, State0) ->
+    %% We need to remove any local grains that are being synced that no longer
+    %% live here. This can happen when we have crashed without deleting the
+    %% grains from the grove first. When we restart the other nodes will sync
+    %% the complete view and those grains will re-appear.
+    State = remove_deactivated(State0, Page),
+    {noreply, State};
+
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -740,7 +786,7 @@ handle_info({nodeup, _Node}, State) ->
 handle_info({'DOWN', MRef, process, Pid, _Info}, State0) ->
     %% Local grain exit
     ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
-    {_, State} = do_unregister_name(State0, Pid),
+    {_, State} = do_unregister_process(State0, Pid),
     {noreply, State};
 
 handle_info(_, State) ->
@@ -763,21 +809,99 @@ terminate(_Reason, State) ->
 %% =============================================================================
 
 
+%% @private
+add(#state{} = State, GrainRef, Value) ->
+    add(#state{} = State, GrainRef, Value, partisan:node()).
+
 
 %% @private
-mst_put(#state{grove = Grove0} = State, Key, Value) ->
-    %% This will broadcast the change to peers
-    Grove = bondy_mst_grove:put(Grove0, Key, Value),
+add(#state{grove = Grove0} = State, Key, Value, Node) ->
+    Tree = bondy_mst_grove:tree(Grove0),
+
+    AWSet1 =
+        case bondy_mst:get(Tree, Key) of
+            undefined ->
+                state_awset:new();
+
+            AWSet0 ->
+                AWSet0
+        end,
+
+    {ok, AWSet} = state_type:mutate({add, Value}, Node, AWSet1),
+    Grove = bondy_mst_grove:put(Grove0, Key, AWSet),
     State#state{grove = Grove}.
 
 
 %% @private
-mst_value_merge(_Key, A, B) ->
-    state_mvregister:merge(A, B).
+remove(#state{} = State, GrainRef, Value) ->
+    remove(#state{} = State, GrainRef, Value, partisan:node()).
 
 
-sort_conflicting_values(MVRegister) ->
-    Set = state_mvregister:query(MVRegister),
+%% @private
+remove(#state{grove = Grove0} = State, Key, Value, Node) ->
+    Tree = bondy_mst_grove:tree(Grove0),
+
+    AWSet1 =
+        case bondy_mst:get(Tree, Key) of
+            undefined ->
+                state_awset:new();
+
+            AWSet0 ->
+                AWSet0
+        end,
+
+    {ok, AWSet} = state_type:mutate({rmv, Value}, Node, AWSet1),
+    Grove = bondy_mst_grove:put(Grove0, Key, AWSet),
+    State#state{grove = Grove}.
+
+
+%% @private
+mst_merge_value(_Key, A, B) ->
+    state_awset:merge(A, B).
+
+
+%% @private
+remove_deactivated(#state{} = State, Page) ->
+    bondy_mst_page:fold(
+        Page,
+        fun({Key, AWSet, _Hash}, Acc) ->
+            remove_deactivated(Acc, Key, AWSet)
+        end,
+        State
+    ).
+
+
+%% @private
+remove_deactivated(State, Key, AWSet) ->
+    Set = state_awset:query(AWSet),
+
+    sets:fold(
+        fun(ProcRef, Acc) ->
+            case partisan_remote_ref:is_local(ProcRef) of
+                true ->
+                    Pid = partisan_remote_ref:to_term(ProcRef),
+
+                    case ets:lookup(?MONITOR_TAB, Pid) of
+                        [{Pid, _GrainRef, _}] ->
+                            Acc;
+
+                        _ ->
+                            %% No longer exists here, so we remove
+                            remove(Acc, Key, ProcRef)
+                    end;
+
+                false ->
+                    Acc
+            end
+        end,
+        State,
+        Set
+    ).
+
+
+
+sort_conflicting_values(AWSet) ->
+    Set = state_awset:query(AWSet),
     lists:sort(
         fun(A, B) ->
             Result = {
@@ -828,11 +952,8 @@ do_register_name(State0, GrainRef, Pid, Mode) when is_pid(Pid) ->
     case monitor(GrainRef, Pid, Mode) of
         ok ->
             Key = grain_key(GrainRef),
-            ProcRef = partisan_remote_ref:from_term(Pid),
-            {ok, Value} = state_type:mutate(
-                {set, 0, ProcRef}, partisan:node(), state_mvregister:new()
-            ),
-            State = mst_put(State0, Key, Value),
+            Value = partisan_remote_ref:from_term(Pid),
+            State = add(State0, Key, Value),
             {ok, State};
 
         {error, _} = Error ->
@@ -842,21 +963,9 @@ do_register_name(State0, GrainRef, Pid, Mode) when is_pid(Pid) ->
 
 %% Used for testing only (see export of register_name/2)
 do_register_name_test(State0, GrainRef, ProcRef) ->
-    Node = partisan:node(ProcRef),
-
-    case Node == partisan:node() of
-        true ->
-            Pid = partisan_remote_ref:to_pid(ProcRef),
-            do_register_name(State0, GrainRef, Pid);
-
-        false ->
-            Key = grain_key(GrainRef),
-            {ok, Value} = state_type:mutate(
-                {set, 0, ProcRef}, Node, state_mvregister:new()
-            ),
-            State = mst_put(State0, Key, Value),
-            {ok, State}
-    end.
+    Key = grain_key(GrainRef),
+    State = add(State0, Key, ProcRef, partisan:node(ProcRef)),
+    {ok, State}.
 
 
 %% -----------------------------------------------------------------------------
@@ -864,9 +973,9 @@ do_register_name_test(State0, GrainRef, ProcRef) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec do_unregister_name(t(), Pid :: pid()) -> {ok, t()}.
+-spec do_unregister_process(t(), Pid :: pid()) -> {ok, t()}.
 
-do_unregister_name(State0, Pid) when is_pid(Pid) ->
+do_unregister_process(State0, Pid) when is_pid(Pid) ->
     case ets:lookup(?MONITOR_TAB, Pid) of
         [{Pid, GrainRef, _}] ->
             do_unregister_name(State0, GrainRef, Pid);
@@ -889,38 +998,16 @@ do_unregister_name(State0, GrainRef, Pid) when is_pid(Pid) ->
     true = ets:delete(?MONITOR_TAB, Pid),
 
     Key = grain_key(GrainRef),
-
-    case bondy_mst:get(?TREE, Key) of
-        undefined ->
-            %% SHOULD NOT HAPPEN
-            ok;
-
-        MVRegister ->
-            ProcRef = partisan_remote_ref:from_term(Pid),
-            {ok, Value} = state_type:mutate(
-                {set, 0, ?TOMBSTONE}, partisan:node(), MVRegister
-            ),
-            State = mst_put(State0, Key, Value),
-            {ok, State}
-    end.
+    Value = partisan_remote_ref:from_term(Pid),
+    State = remove(State0, Key, Value),
+    {ok, State}.
 
 
 do_unregister_name_test(State0, GrainRef, ProcRef) ->
-    Node = partisan:node(ProcRef),
+    Key = grain_key(GrainRef),
+    State = remove(State0, Key, ProcRef, partisan:node(ProcRef)),
+    {ok, State}.
 
-    case Node == partisan:node() of
-        true ->
-            Pid = partisan_remote_ref:to_pid(ProcRef),
-            do_unregister_name(State0, GrainRef, Pid);
-
-        false ->
-            Key = grain_key(GrainRef),
-            {ok, Value} = state_type:mutate(
-                {set, 0, ?TOMBSTONE}, Node, state_mvregister:new()
-            ),
-            State = mst_put(State0, Key, Value),
-            {ok, State}
-    end.
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -970,28 +1057,6 @@ demonitor(Pid) ->
             ok
     end.
 
-
-
-%% -----------------------------------------------------------------------------
-%% @private
-%% @doc Lookups all the registered grains under name `GrainRef' using the
-%% local ets-based materialised view.
-%% @end
-%% -----------------------------------------------------------------------------
--spec lookup(GrainRef :: erleans:grain_ref() | grain_key()) ->
-    [partisan_remote_ref:p()].
-
-lookup(#{id := _} = GrainRef) ->
-    lookup(grain_key(GrainRef));
-
-lookup({_, _} = GrainKey) ->
-    case bondy_mst:get(?TREE, GrainKey) of
-        undefined ->
-            [];
-
-        MVRegister ->
-            sort_conflicting_values(MVRegister)
-    end.
 
 
 %% -----------------------------------------------------------------------------
@@ -1200,11 +1265,11 @@ unregister_all(_, '$end_of_table') ->
 %% This call is serialised the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
--spec register_name(erleans:grain_ref(), partisan_remote_ref:p()) ->
+-spec register_name_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok
     | {error, {already_in_use, partisan_remote_ref:p()}}.
 
-register_name(GrainRef, ProcRef) ->
+register_name_(GrainRef, ProcRef) ->
     partisan_gen_server:call(?MODULE, {register_name_test, GrainRef, ProcRef}).
 
 
@@ -1213,12 +1278,39 @@ register_name(GrainRef, ProcRef) ->
 %% This call is serialised the `erleans_pm' server process.
 %% @end
 %% -----------------------------------------------------------------------------
--spec unregister_name(erleans:grain_ref(), partisan_remote_ref:p()) ->
+-spec unregister_name_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok | {error, badgrain | not_owner}.
 
-unregister_name(#{id := _} = GrainRef, ProcRef) ->
+unregister_name_(#{id := _} = GrainRef, ProcRef) ->
     partisan_gen_server:call(
         ?MODULE, {unregister_name_test, GrainRef, ProcRef}
+    ).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Registers the calling process with the `id' attribute of `GrainRef'.
+%% This call is serialised the `erleans_pm' server process.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec add_(erleans:grain_ref(), partisan_remote_ref:p()) ->
+    ok
+    | {error, {already_in_use, partisan_remote_ref:p()}}.
+
+add_(GrainRef, ProcRef) ->
+    partisan_gen_server:call(?MODULE, {add_test, GrainRef, ProcRef}).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc It can only be called by the caller
+%% This call is serialised the `erleans_pm' server process.
+%% @end
+%% -----------------------------------------------------------------------------
+-spec remove_(erleans:grain_ref(), partisan_remote_ref:p()) ->
+    ok | {error, badgrain | not_owner}.
+
+remove_(#{id := _} = GrainRef, ProcRef) ->
+    partisan_gen_server:call(
+        ?MODULE, {remove_test, GrainRef, ProcRef}
     ).
 
 

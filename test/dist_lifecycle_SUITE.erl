@@ -21,7 +21,8 @@ all() ->
     [manual_start_stop, activate_callback].
 
 init_per_suite(Config) ->
-    application:load(plum_db), % will load partisan
+    application:load(partisan),
+    application:load(bondy_mst),
     application:load(erleans),
     application:set_env(partisan, peer_port, 10200),
     application:set_env(partisan, pid_encoding, false),
@@ -31,29 +32,31 @@ init_per_suite(Config) ->
     application:set_env(partisan, periodic_interval, 100),
     logger:set_application_level(partisan, error),
     logger:set_application_level(erleans, debug),
-    {ok, _} = application:ensure_all_started(plum_db), % will start partisan
+    {ok, _} = application:ensure_all_started(partisan),
+    {ok, _} = application:ensure_all_started(bondy_mst),
     {ok, _} = application:ensure_all_started(erleans),
     start_nodes(),
     Config.
 
 end_per_suite(_Config) ->
     application:stop(erleans),
-    application:stop(plum_db), % will stop partisan
+    application:stop(partisan),
+    application:stop(bondy_mst),
     application:unload(erleans),
-    application:unload(plum_db),
+    application:unload(bondy_mst),
 
     {ok, _} = ct_slave:stop(?NODE_A),
     ok.
 
 start_nodes() ->
     Nodes = [{?NODE_A, 10201}], %, b, c, d],
-    ct:pal("\e[32m Starting nodes ~p \e[0m", [Nodes]),
+    ct:log("\e[32m Starting nodes ~p \e[0m", [Nodes]),
     start_nodes(Nodes, []).
 
 start_nodes([], Acc) ->
     Acc;
 start_nodes([{Node, PeerPort} | T], Acc) ->
-    ct:pal("\e[32m Starting node ~p \e[0m", [Node]),
+    ct:log("\e[32m Starting node ~p \e[0m", [Node]),
     CodePath = code:get_path(),
     Paths = lists:flatten([["-pa ", Path, " "] || Path <- CodePath]),
     ErlFlags = "-config ../../../../test/sys.config " ++ Paths,

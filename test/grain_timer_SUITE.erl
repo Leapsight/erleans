@@ -31,22 +31,29 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(defaults, Config) ->
-    application:load(plum_db), % will load partisan
+    application:load(partisan),
+    application:load(bondy_mst),
     application:load(erleans),
-    {ok, _} = application:ensure_all_started(plum_db), % will start partisan
+    {ok, _} = application:ensure_all_started(partisan),
+    {ok, _} = application:ensure_all_started(bondy_mst),
     {ok, _} = application:ensure_all_started(erleans),
     Config;
 init_per_group(deactivate_after_30, Config) ->
+    application:load(partisan),
+    application:load(bondy_mst),
     application:load(erleans),
     application:set_env(erleans, deactivate_after, 30),
+        {ok, _} = application:ensure_all_started(partisan),
+    {ok, _} = application:ensure_all_started(bondy_mst),
     {ok, _} = application:ensure_all_started(erleans),
     Config.
 
 end_per_group(_, _Config) ->
     application:stop(erleans),
-    application:stop(plum_db), % will stop partisan
+    application:stop(partisan),
+    application:stop(bondy_mst),
     application:unload(erleans),
-    application:unload(plum_db),
+    application:unload(bondy_mst),
     ok.
 
 single_timer(_Config) ->
