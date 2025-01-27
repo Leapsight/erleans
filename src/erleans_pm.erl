@@ -289,6 +289,7 @@ lookup({_, _} = GrainKey) ->
             sort_conflicting_values(AWSet)
     end.
 
+
 %% -----------------------------------------------------------------------------
 %% @doc Returns the `erleans:grain_ref' for a Pid. This is more efficient than
 %% {@link erleans_grain:grain_ref} as it is not calling the grain (which might
@@ -303,11 +304,11 @@ lookup({_, _} = GrainKey) ->
 
 grain_ref(Pid) when is_pid(Pid) ->
     %% A local grain so we use the monitor table which is faster
-    case ets:lookup(?MONITOR_TAB, Pid) of
-        [{Pid, GrainRef, _}] ->
+    case monitor_lookup(Pid) of
+        {Pid, GrainRef, _} ->
             {ok, GrainRef};
 
-        [] ->
+        undefined ->
             {error, not_found}
     end;
 
@@ -389,12 +390,24 @@ broadcast(Event) ->
 
 
 on_merge(Page) ->
-    %% @TODO remove local references that are no longer active
+    %% This is called during an AAE when the grove received a Page from its
+    %% peer.
+    ?LOG_INFO(#{
+        description => "on_merge",
+        page => Page
+    }),
     partisan_gen_server:cast(?MODULE, {grove_on_merge, Page}).
 
 
-on_update(_Key, _Value0) ->
-    ok.
+on_update(Key, Value) ->
+    %% This is called every time a local put is done or when a remote Gossip
+    %% message is received.
+    ?LOG_INFO(#{
+        description => "on_update",
+        key => Key,
+        value => Value
+    }),
+    deduplicate(Key, Value).
 
 
 
@@ -746,6 +759,21 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Request :: term(), State :: t()) ->
     {noreply, NewState :: t()}.
 
+handle_cast({grove_message, Msg}, State) ->
+    %% Fwd message to bondy_mst_grove
+    Grove = bondy_mst_grove:handle(State#state.grove, Msg),
+    {noreply, State#state{grove = Grove}};
+
+handle_cast({grove_on_merge, Page}, State0) ->
+    %% We need to remove any local grains that are being synced that no longer
+    %% live here. This can happen when we have crashed without deleting the
+    %% grains from the grove first. When we restart the other nodes will sync
+    %% the complete view and those grains will re-appear.
+    State = remove_deactivated(State0, Page),
+    ok = deduplicate(Page),
+
+    {noreply, State};
+
 handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
     case partisan_remote_ref:is_local(ProcRef) of
@@ -757,18 +785,6 @@ handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
         false ->
          {noreply, State0}
     end;
-
-handle_cast({grove_message, Msg}, State) ->
-    Grove = bondy_mst_grove:handle(State#state.grove, Msg),
-    {noreply, State#state{grove = Grove}};
-
-handle_cast({grove_on_merge, Page}, State0) ->
-    %% We need to remove any local grains that are being synced that no longer
-    %% live here. This can happen when we have crashed without deleting the
-    %% grains from the grove first. When we restart the other nodes will sync
-    %% the complete view and those grains will re-appear.
-    State = remove_deactivated(State0, Page),
-    {noreply, State};
 
 handle_cast(_Request, State) ->
     {noreply, State}.
@@ -783,9 +799,9 @@ handle_info({nodedown, _Node}, State) ->
 handle_info({nodeup, _Node}, State) ->
     {noreply, State};
 
-handle_info({'DOWN', MRef, process, Pid, _Info}, State0) ->
-    %% Local grain exit
-    ?LOG_DEBUG("Process down ~p", [{Pid, MRef}]),
+handle_info({'DOWN', MRef, process, Pid, _Info}, State0) when is_pid(Pid) ->
+    %% Registered (monitored) grain exit
+    ?LOG_DEBUG("Grain down ~p", [{Pid, MRef}]),
     {_, State} = do_unregister_process(State0, Pid),
     {noreply, State};
 
@@ -798,7 +814,7 @@ handle_info(_, State) ->
     State :: t()) -> ok.
 
 terminate(_Reason, State) ->
-    ok = unregister_all(State),
+    ok = unregister_all_local(State),
     _ = persistent_term:erase(?PERSISTENT_KEY),
     ok.
 
@@ -856,8 +872,23 @@ remove(#state{grove = Grove0} = State, Key, Value, Node) ->
 
 
 %% @private
+monitor_lookup(Pid) ->
+     case ets:lookup(?MONITOR_TAB, Pid) of
+        [Monitor] ->
+            Monitor;
+
+        _ ->
+            undefined
+    end.
+
+
+%% @private
 mst_merge_value(_Key, A, B) ->
-    state_awset:merge(A, B).
+    Result = state_awset:merge(A, B),
+    ?LOG_DEBUG(#{
+        description => "Merging values", a => A, b => B, result => Result
+    }),
+    Result.
 
 
 %% @private
@@ -881,11 +912,15 @@ remove_deactivated(State, Key, AWSet) ->
                 true ->
                     Pid = partisan_remote_ref:to_term(ProcRef),
 
-                    case ets:lookup(?MONITOR_TAB, Pid) of
-                        [{Pid, _GrainRef, _}] ->
+                    case monitor_lookup(Pid) of
+                        {Pid, _GrainRef, _} ->
                             Acc;
 
-                        _ ->
+                        undefined ->
+                            ?LOG_INFO(#{
+                                message => "Removing grain from registry",
+                                reason => deactivated
+                            }),
                             %% No longer exists here, so we remove
                             remove(Acc, Key, ProcRef)
                     end;
@@ -897,7 +932,6 @@ remove_deactivated(State, Key, AWSet) ->
         State,
         Set
     ).
-
 
 
 sort_conflicting_values(AWSet) ->
@@ -976,10 +1010,10 @@ do_register_name_test(State0, GrainRef, ProcRef) ->
 -spec do_unregister_process(t(), Pid :: pid()) -> {ok, t()}.
 
 do_unregister_process(State0, Pid) when is_pid(Pid) ->
-    case ets:lookup(?MONITOR_TAB, Pid) of
-        [{Pid, GrainRef, _}] ->
+    case monitor_lookup(Pid) of
+        {Pid, GrainRef, _} ->
             do_unregister_name(State0, GrainRef, Pid);
-        _ ->
+        undefined ->
             {ok, State0}
     end.
 
@@ -1032,7 +1066,7 @@ monitor(GrainRef, Pid, strict) when is_pid(Pid) ->
 
         false ->
             true = erlang:demonitor(Mref, [flush]),
-            [{OtherPid, GrainRef, _}] = ets:lookup(?MONITOR_TAB, Pid),
+            {OtherPid, GrainRef, _} = monitor_lookup(Pid),
             {error, {already_in_use, partisan_remote_ref:from_term(OtherPid)}}
     end;
 
@@ -1058,6 +1092,47 @@ demonitor(Pid) ->
     end.
 
 
+%% @private
+deduplicate(Page) ->
+    bondy_mst_page:fold(
+        Page,
+        fun({GrainRef, AWSet, _Hash}, ok) ->
+            deduplicate(GrainRef, AWSet)
+        end,
+        ok
+    ).
+
+
+%% @private
+%% We only action on local duplicates. Each peer will do the same.
+deduplicate(GrainRef, AWSet) ->
+    %% Check if we have an active local grain for GrainRef
+    Fun = fun
+        (ProcRef, {undefined, RemoteReachable}) ->
+            case partisan_remote_ref:is_local(ProcRef) of
+                true ->
+                   {ProcRef, RemoteReachable};
+
+                false ->
+                    {undefined, RemoteReachable orelse is_reachable(ProcRef)}
+            end;
+
+        (ProcRef, {LocalPRef, false}) ->
+            {LocalPRef, is_reachable(ProcRef)};
+
+        (ProcRef, {LocalPRef, true}) ->
+            ok = deactivate_grain(GrainRef, LocalPRef),
+            throw(break)
+    end,
+
+    try
+        _ = sets:fold(Fun, {undefined, false}, state_awset:query(AWSet)),
+        ok
+    catch
+        throw:break ->
+            ok
+    end.
+
 
 %% -----------------------------------------------------------------------------
 %% @private
@@ -1068,7 +1143,7 @@ deactivate_grain(GrainRef, ProcRef) ->
     case erleans_grain:deactivate(ProcRef) of
         ok ->
             ?LOG_NOTICE(#{
-                description => "Requested duplicate deactivation",
+                description => "Succeded to deactivate duplicate",
                 grain => GrainRef,
                 pid => ProcRef
             });
@@ -1129,19 +1204,36 @@ pick([H], _, [unsafe]) ->
 pick([H | _], _, [unsafe]) ->
     H;
 
-pick([H | T], GrainRef, [safe]) ->
+pick(List, GrainRef, [safe]) ->
+    pick_alive(List, GrainRef).
+
+
+%% @private
+pick_alive([H | T], GrainRef) ->
     try is_proc_alive(H, GrainRef) of
         true ->
             H;
 
         false ->
-            pick(T, GrainRef, [safe])
+            pick_alive(T, GrainRef)
 
     catch
         error:_ ->
-            pick(T, GrainRef, [safe])
-    end.
+            pick_alive(T, GrainRef)
+    end;
 
+pick_alive([], _) ->
+    undefined.
+
+
+%% @private
+sort_by_location(List, GrainRef) ->
+    lists:sort(
+        fun(ProcRef, Arg2) ->
+            erleans_grain:is_location_right(GrainRef, ProcRef)
+        end,
+        List
+    ).
 
 
 
@@ -1214,12 +1306,12 @@ is_reachable(ProcRef) ->
 %% @doc Unregisters all local alive processes.
 %% @end
 %% -----------------------------------------------------------------------------
--spec unregister_all(t()) -> ok.
+-spec unregister_all_local(t()) -> ok.
 
-unregister_all(State) ->
+unregister_all_local(State) ->
     true = ets:safe_fixtable(?MONITOR_TAB, true),
     try
-        unregister_all(State, ets:first(?MONITOR_TAB))
+        unregister_local(State, ets:first(?MONITOR_TAB))
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
@@ -1235,18 +1327,18 @@ unregister_all(State) ->
 
 
 %% @private
-unregister_all(State0, Pid) when is_pid(Pid) ->
+unregister_local(State0, Pid) when is_pid(Pid) ->
     %% {Pid, GrainRef, MRef}
     GrainRef = ets:lookup_element(?MONITOR_TAB, Pid, 2),
     {ok, State} = do_unregister_name(State0, GrainRef, Pid),
-    unregister_all(State, ets:next(?MONITOR_TAB, Pid));
+    unregister_local(State, ets:next(?MONITOR_TAB, Pid));
 
-%% unregister_all(State, #{id := _} = GrainRef) ->
+%% unregister_local(State, #{id := _} = GrainRef) ->
 %%     %% Ignore as we have two entries per registration
 %%     %% {Pid, GrainRef} and {GrainRef, Pid}, we just use the first
-%%     unregister_all(State, ets:next(?MONITOR_TAB, GrainRef));
+%%     unregister_local(State, ets:next(?MONITOR_TAB, GrainRef));
 
-unregister_all(_, '$end_of_table') ->
+unregister_local(_, '$end_of_table') ->
     ok.
 
 
