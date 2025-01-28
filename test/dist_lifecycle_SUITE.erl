@@ -157,7 +157,15 @@ deduplication(Config) ->
     timer:sleep(3000),
 
     %% LocalProcRef should be gone
-    ?assertEqual([RemoteProcRef], erleans_pm:lookup(GrainRef)),
+    ?assertEqual(
+        [RemoteProcRef],
+        erleans_pm:lookup(GrainRef)
+    ),
+    ?assertEqual(
+        [RemoteProcRef],
+        rpc:call(?NODE_A, erleans_pm, lookup, [GrainRef])
+    ),
+
 
     meck:unload(erleans_pm),
     meck:unload(erleans_grain),
