@@ -18,7 +18,11 @@
 -define(NODE_A, 'a@127.0.0.1').
 
 all() ->
-    [manual_start_stop, activate_callback].
+    [
+        manual_start_stop,
+        activate_callback,
+        deduplication
+    ].
 
 init_per_suite(Config) ->
     application:load(partisan),
@@ -48,6 +52,123 @@ end_per_suite(_Config) ->
     {ok, _} = ct_slave:stop(?NODE_A),
     ok.
 
+
+
+
+%% =============================================================================
+%% TEST CASES
+%% =============================================================================
+
+
+
+manual_start_stop(Config) ->
+    ok = join_nodes(),
+    Grain1 = erleans:get_grain(test_grain, <<"grain1">>),
+    Grain2 = erleans:get_grain(test_grain, <<"grain2">>),
+
+    ?assertEqual(
+        {ok, 1},
+        test_grain:activated_counter(Grain1)
+    ),
+
+    ?assertEqual(
+        {ok, 1},
+        rpc:call(?NODE_A, test_grain, activated_counter, [Grain2])
+    ),
+
+    %% ensure we've waited a broadcast interval
+    timer:sleep(500),
+
+    ProcRef1 = erleans_pm:whereis_name(Grain1),
+    ProcRef2 = erleans_pm:whereis_name(Grain2),
+
+    %% verify grain1 is on node ct and grain2 is on node a
+    ?assertEqual(?NODE_CT, partisan_remote_ref:node(ProcRef1)),
+    ?assertEqual(?NODE_A, partisan_remote_ref:node(ProcRef2)),
+
+    ?assertEqual({ok, ?NODE_CT}, rpc:call(?NODE_A, test_grain, node, [Grain1])),
+    ?assertEqual({ok, 1}, rpc:call(?NODE_A, test_grain, activated_counter, [Grain2])),
+
+    timer:sleep(200),
+
+    ?assertEqual({ok, ?NODE_A}, rpc:call(?NODE_A, test_grain, node, [Grain2])),
+    ?assertEqual({ok, ?NODE_A}, test_grain:node(Grain2)),
+
+    ok.
+
+
+activate_callback(_Config) ->
+    ok = join_nodes(),
+    meck:new(test_grain, [passthrough]),
+    meck:expect(test_grain, placement,
+        fun() -> {callback, ?MODULE, activate_callback_placement} end
+    ),
+    Grain3 = erleans:get_grain(test_grain, <<"grain3">>),
+    Expected = activate_callback_placement(Grain3),
+    ?assertEqual({ok, Expected}, test_grain:node(Grain3)).
+
+
+deduplication(Config) ->
+    GrainRef = erleans:get_grain(test_grain, <<"grain1">>),
+
+    %% We create duplicate
+    ?assertEqual(
+        {ok, 1},
+        test_grain:activated_counter(GrainRef)
+    ),
+    ?assertEqual(
+        {ok, 1},
+        rpc:call(?NODE_A, test_grain, activated_counter, [GrainRef])
+    ),
+
+    [LocalProcRef] = erleans_pm:lookup(GrainRef),
+    [RemoteProcRef] = rpc:call(?NODE_A, erleans_pm, lookup, [GrainRef]),
+
+    %% We override NODE_CT's functions so that we define RemoteProcRef to be
+    %% in the right location but not LocalProcRef. This should depuplicate,
+    %% forcing LocalProcRef to be deactivated, during AAE sync.
+    meck:new(erleans_pm, [passthrough]),
+    meck:new(erleans_grain, [passthrough]),
+
+    meck:expect(erleans_pm, is_reachable,
+        fun
+            (P) when P == RemoteProcRef ->
+                true;
+            (P) ->
+                meck:passthrough(P)
+        end
+    ),
+
+    meck:expect(erleans_grain, is_location_right,
+        fun
+            (G, P) when G == GrainRef andalso P == RemoteProcRef ->
+                true;
+
+            (_, _) ->
+                %% The local ref
+                false
+        end
+    ),
+
+    %% We join the cluster and trigger an AAE sync
+    ok = join_nodes(),
+    ok = erleans_pm:exchange(?NODE_A),
+
+    timer:sleep(3000),
+
+    %% LocalProcRef should be gone
+    ?assertEqual([RemoteProcRef], erleans_pm:lookup(GrainRef)),
+
+    meck:unload(erleans_pm),
+    meck:unload(erleans_grain),
+
+    ok.
+
+%% =============================================================================
+%% PRIVATE
+%% =============================================================================
+
+
 start_nodes() ->
     Nodes = [{?NODE_A, 10201}], %, b, c, d],
     ct:log("\e[32m Starting nodes ~p \e[0m", [Nodes]),
@@ -55,6 +176,7 @@ start_nodes() ->
 
 start_nodes([], Acc) ->
     Acc;
+
 start_nodes([{Node, PeerPort} | T], Acc) ->
     ct:log("\e[32m Starting node ~p \e[0m", [Node]),
     CodePath = code:get_path(),
@@ -92,48 +214,23 @@ start_nodes([{Node, PeerPort} | T], Acc) ->
 
     ct:pal("\e[32m Node ~p [OK] \e[0m", [HostNode]),
     true = net_kernel:connect_node(?NODE_A),
-    rpc:call(?NODE_A, partisan_peer_service, join, [#{name => ?NODE_CT,
-                                                      listen_addrs => [#{ip => {127,0,0,1}, port => 10200}],
-                                                      parallelism => 1}]),
-    ok = partisan_peer_service:join(#{name => ?NODE_A,
-                                  listen_addrs => [#{ip => {127,0,0,1}, port => PeerPort}],
-                                  parallelism => 1}),
     start_nodes(T, [HostNode | Acc]).
 
-manual_start_stop(_Config) ->
-    Grain1 = erleans:get_grain(test_grain, <<"grain1">>),
-    Grain2 = erleans:get_grain(test_grain, <<"grain2">>),
 
-    ?assertEqual({ok, 1}, test_grain:activated_counter(Grain1)),
-    ?assertEqual({ok, 1}, rpc:call(?NODE_A, test_grain, activated_counter, [Grain2])),
+join_nodes() ->
+    rpc:call(?NODE_A, partisan_peer_service, join, [#{
+        name => ?NODE_CT,
+        listen_addrs => [#{ip => {127,0,0,1}, port => 10200}],
+        parallelism => 1}
+    ]),
 
-    %% ensure we've waited a broadcast interval
-    timer:sleep(500),
-
-    %% verify grain1 is on node ct and grain2 is on node a
-    ?assertEqual({ok, ?NODE_CT}, test_grain:node(Grain1)),
-    ?assertEqual({ok, ?NODE_A}, test_grain:node(Grain2)),
-
-    ?assertEqual({ok, ?NODE_CT}, rpc:call(?NODE_A, test_grain, node, [Grain1])),
-    ?assertEqual({ok, 1}, rpc:call(?NODE_A, test_grain, activated_counter, [Grain2])),
-
-    timer:sleep(200),
-
-    ?assertEqual({ok, ?NODE_A}, rpc:call(?NODE_A, test_grain, node, [Grain2])),
-    ?assertEqual({ok, ?NODE_A}, test_grain:node(Grain2)),
+    ok = partisan_peer_service:join(#{
+        name => ?NODE_A,
+        listen_addrs => [#{ip => {127,0,0,1}, port => 10201}],
+        parallelism => 1
+    }),
 
     ok.
-
-
-activate_callback(_Config) ->
-    meck:new(test_grain, [passthrough]),
-    meck:expect(test_grain, placement,
-        fun() -> {callback, ?MODULE, activate_callback_placement} end
-    ),
-    Grain3 = erleans:get_grain(test_grain, <<"grain3">>),
-    Expected = activate_callback_placement(Grain3),
-    ?assertEqual({ok, Expected}, test_grain:node(Grain3)).
-
 
 %% used by activate_callback
 activate_callback_placement(_GrainRef) ->

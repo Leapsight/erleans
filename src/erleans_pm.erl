@@ -1120,9 +1120,16 @@ deduplicate(GrainRef, AWSet) ->
         (ProcRef, {LocalPRef, false}) ->
             {LocalPRef, is_reachable(ProcRef)};
 
-        (ProcRef, {LocalPRef, true}) ->
-            ok = deactivate_grain(GrainRef, LocalPRef),
-            throw(break)
+        (_, {LocalPRef, true}) ->
+            case erleans_grain:is_location_right(GrainRef, LocalPRef) of
+                true ->
+                    ok = deactivate_grain(GrainRef, LocalPRef),
+                    throw(break);
+
+                false ->
+                    throw(break)
+            end
+
     end,
 
     try
@@ -1224,17 +1231,6 @@ pick_alive([H | T], GrainRef) ->
 
 pick_alive([], _) ->
     undefined.
-
-
-%% @private
-sort_by_location(List, GrainRef) ->
-    lists:sort(
-        fun(ProcRef, Arg2) ->
-            erleans_grain:is_location_right(GrainRef, ProcRef)
-        end,
-        List
-    ).
-
 
 
 %% -----------------------------------------------------------------------------
