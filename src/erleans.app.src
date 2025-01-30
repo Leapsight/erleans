@@ -11,6 +11,7 @@
     gproc,
     sbroker,
     erlware_commons,
+    bondy_mst,
     opentelemetry_api
    ]},
   {modules, []},
