@@ -105,8 +105,6 @@
 %% BONDY_MST_GROVE CALLBACKS
 -export([send/2]).
 -export([broadcast/1]).
--export([on_merge/1]).
--export([on_update/2]).
 
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
 -export([broadcast_data/1]).
@@ -387,27 +385,6 @@ send(Peer, Message) ->
 broadcast(Event) ->
     ?LOG_INFO("Broadcasting event ~p", [Event]),
     partisan:broadcast(Event, ?MODULE).
-
-
-on_merge(Page) ->
-    %% This is called during an AAE when the grove received a Page from its
-    %% peer.
-    ?LOG_INFO(#{
-        description => "on_merge",
-        page => Page
-    }),
-    partisan_gen_server:cast(?MODULE, {grove_on_merge, Page}).
-
-
-on_update(Key, Value) ->
-    %% This is called every time a local put is done or when a remote Gossip
-    %% message is received.
-    ?LOG_INFO(#{
-        description => "on_update",
-        key => Key,
-        value => Value
-    }),
-    deduplicate(Key, Value).
 
 
 
@@ -854,9 +831,14 @@ remove(#state{} = State, GrainRef, Value) ->
 
 
 %% @private
-remove(#state{grove = Grove0} = State, Key, Value, Node) ->
-    Tree = bondy_mst_grove:tree(Grove0),
+remove(#state{grove = Grove} = State, Key, Value, Node) ->
+    Grove = grove_remove(Grove, Key, Value, Node),
+    State#state{grove = Grove}.
 
+
+%% @private
+grove_remove(Grove, Key, Value, Node) ->
+    Tree = bondy_mst_grove:tree(Grove),
     AWSet1 =
         case bondy_mst:get(Tree, Key) of
             undefined ->
@@ -865,10 +847,19 @@ remove(#state{grove = Grove0} = State, Key, Value, Node) ->
             AWSet0 ->
                 AWSet0
         end,
-
     {ok, AWSet} = state_type:mutate({rmv, Value}, Node, AWSet1),
-    Grove = bondy_mst_grove:put(Grove0, Key, AWSet),
-    State#state{grove = Grove}.
+    bondy_mst_grove:put(Grove, Key, AWSet).
+
+
+%% @private
+awset_remove(AWSet0, Value) ->
+    {ok, AWSet} = state_type:mutate({rmv, Value}, partisan:node(), AWSet0),
+    AWSet.
+
+
+%% @private
+is_monitored(Pid) ->
+    monitor_lookup(Pid) =/= undefined.
 
 
 %% @private
@@ -883,12 +874,73 @@ monitor_lookup(Pid) ->
 
 
 %% @private
-mst_merge_value(_Key, A, B) ->
-    Result = state_awset:merge(A, B),
+mst_merge_value(GrainRef, AWSet1, AWSet2) ->
+    AWSet = state_awset:merge(AWSet1, AWSet2),
     ?LOG_DEBUG(#{
-        description => "Merging values", a => A, b => B, result => Result
+        description => "Merging values",
+        rhs => AWSet1,
+        lhs => AWSet1,
+        result => AWSet
     }),
-    Result.
+    cleanup(GrainRef, AWSet).
+
+
+%% @private
+cleanup(GrainRef, AWSet0) ->
+    Fun = fun
+        (ProcRef, {undefined, RemoteReachable0, AWS0}) ->
+            case partisan_remote_ref:is_local(ProcRef) of
+                true ->
+                    {LocalPref, AWS} = cleanup_deactivated(ProcRef, AWS0),
+                    {LocalPref, RemoteReachable0, AWS};
+
+                false ->
+                    RemoteReachable =
+                        RemoteReachable0 orelse is_reachable(ProcRef),
+
+                    {undefined, RemoteReachable, AWS0}
+            end;
+
+        (ProcRef, {LocalPRef, false, AWS}) ->
+            {LocalPRef, is_reachable(ProcRef), AWS};
+
+        (_, {LocalPRef, true, AWS}) ->
+            case erleans_grain:is_location_right(GrainRef, LocalPRef) of
+                true ->
+                    %% Ask the grain to deactivate
+                    ok = deactivate_grain(GrainRef, LocalPRef),
+                    throw({break, AWS});
+
+                false ->
+                    throw({break, AWS})
+            end
+
+    end,
+
+    try
+        {_, _, AWSet1} = sets:fold(
+            Fun, {undefined, false, AWSet0}, state_awset:query(AWSet0)
+        ),
+        AWSet1
+    catch
+        throw:{break, AWSet2} ->
+            AWSet2
+    end.
+
+
+cleanup_deactivated(ProcRef, AWS0) ->
+    case is_monitored(partisan_remote_ref:to_pid(ProcRef)) of
+        true ->
+            {ProcRef, AWS0};
+
+        false ->
+            %% No longer exists here, so we remove
+            ?LOG_DEBUG(#{
+                message => "Removing grain from registry",
+                reason => deactivated
+            }),
+            {undefined, awset_remove(AWS0, ProcRef)}
+    end.
 
 
 %% @private
