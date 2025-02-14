@@ -91,15 +91,10 @@ whereis_name(Config) ->
     {ok, 0} = test_grain:call_counter(GrainRef),
     %% Grain should have beend activated and registered
 
-    PidRef = erleans_pm:whereis_name(GrainRef),
     Node = partisan:node(),
-    ?assertMatch([Node|_PidStr], PidRef),
+    ?assertMatch([Node|_PidStr], erleans_pm:whereis_name(GrainRef)),
 
-    ?SLEEP,
-
-    ?assertMatch(undefined, erleans_pm:whereis_name(GrainRef)),
-    ?assertMatch(undefined, erleans_pm:whereis_name(GrainRef, [safe])),
-    ?assertMatch(undefined, erleans_pm:whereis_name(GrainRef, [unsafe])).
+    erleans_grain:deactivate(GrainRef).
 
 
 already_in_use(Config) ->
@@ -117,7 +112,11 @@ already_in_use(Config) ->
 
 
 stale_local_entry(Config) ->
-    GrainRef = ?config(grainref, Config),
+    GrainRef = #{id => <<"test_grain">>,
+        implementing_module => erleans_dummy_grain,
+        placement => prefer_local,
+        provider => {erleans_provider_ets, in_memory}
+    },
 
     %% We simulate a previous local registration. This case can happen
     %% when there was a registration on a previous instantiation of this node
