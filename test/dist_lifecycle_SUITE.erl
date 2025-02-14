@@ -26,7 +26,6 @@ all() ->
 
 init_per_suite(Config) ->
     application:load(partisan),
-    application:load(bondy_mst),
     application:load(erleans),
     application:set_env(partisan, peer_port, 10200),
     application:set_env(partisan, pid_encoding, false),
@@ -81,6 +80,9 @@ manual_start_stop(Config) ->
 
     ProcRef1 = erleans_pm:whereis_name(Grain1),
     ProcRef2 = erleans_pm:whereis_name(Grain2),
+
+    ct:pal("Grain1: ~p, At: ~p", [Grain1, ProcRef1]),
+    ct:pal("Grain2: ~p, At: ~p", [Grain2, ProcRef2]),
 
     %% verify grain1 is on node ct and grain2 is on node a
     ?assertEqual(?NODE_CT, partisan_remote_ref:node(ProcRef1)),
@@ -179,50 +181,89 @@ deduplication(Config) ->
 
 start_nodes() ->
     Nodes = [{?NODE_A, 10201}], %, b, c, d],
-    ct:log("\e[32m Starting nodes ~p \e[0m", [Nodes]),
+    ct:log("Starting nodes ~p", [Nodes]),
     start_nodes(Nodes, []).
 
 start_nodes([], Acc) ->
     Acc;
 
+%% start_nodes([{Node, PeerPort} | T], Acc) ->
+%%     ct:log("Starting node ~p", [Node]),
+%%     CodePath = code:get_path(),
+%%     Paths = lists:flatten([["-pa ", Path, " "] || Path <- CodePath]),
+%%     ErlFlags = "-config ../../../../test/sys.config " ++ Paths,
+
+%%     {ok, HostNode} = ct_slave:start(Node,[
+%%         {kill_if_fail, true},
+%%         {monitor_master, true},
+%%         {init_timeout, 3000},
+%%         {startup_timeout, 3000},
+%%         {startup_functions, [
+%%             {logger, set_handler_config, [default, config,
+%%                 #{file => "log/ct_console.log"}
+%%             ]},
+%%             {logger, set_handler_config, [default, formatter,
+%%              {logger_formatter, #{}}]},
+%%             {application, load, [partisan]},
+%%             {application, load, [bondy_mst]},
+%%             {application, load, [erleans]},
+%%             {application, set_env, [partisan, pid_encoding, false]},
+%%             {application, set_env, [partisan, remote_ref_as_uri, true]},
+%%             {application, set_env, [partisan, periodic_enabled, true]},
+%%             {application, set_env, [partisan, periodic_interval, 100]},
+%%             {application, set_env, [partisan, peer_port, PeerPort]},
+%%             {application, ensure_all_started, [partisan]},
+%%             {application, ensure_all_started, [bondy_mst]},
+%%             {application, ensure_all_started, [erleans]}
+%%         ]},
+%%         {erl_flags, ErlFlags}
+%%     ]),
+%%     timer:sleep(1000),
+
+%%     ct:pal("Node ~p [OK]", [HostNode]),
+%%     true = net_kernel:connect_node(?NODE_A),
+%%     start_nodes(T, [HostNode | Acc]).
+
 start_nodes([{Node, PeerPort} | T], Acc) ->
-    ct:log("\e[32m Starting node ~p \e[0m", [Node]),
     CodePath = code:get_path(),
-    Paths = lists:flatten([["-pa ", Path, " "] || Path <- CodePath]),
-    ErlFlags = "-config ../../../../test/sys.config " ++ Paths,
-    PDBPrefixes = [{erleans_pm, #{shard_by => prefix, type => ram}}],
-    DataDir = atom_to_list(Node) ++ "_data",
-
-    {ok, HostNode} = ct_slave:start(Node,[
-        {kill_if_fail, true},
-        {monitor_master, true},
-        {init_timeout, 3000},
-        {startup_timeout, 3000},
-        {startup_functions, [
-            {logger, set_handler_config, [default, config,
-                #{file => "log/ct_console.log"}
-            ]},
-            {logger, set_handler_config, [default, formatter,
-             {logger_formatter, #{}}]},
-            {application, load, [plum_db]},
-            {application, load, [erleans]},
-            {application, set_env, [partisan, pid_encoding, false]},
-            {application, set_env, [partisan, remote_ref_as_uri, true]},
-            {application, set_env, [partisan, periodic_enabled, true]},
-            {application, set_env, [partisan, periodic_interval, 100]},
-            {application, set_env, [partisan, peer_port, PeerPort]},
-            {application, set_env, [plum_db, data_dir, DataDir]},
-            {application, set_env, [plum_db, prefixes, PDBPrefixes]},
-            {application, ensure_all_started, [plum_db]},
-            {application, ensure_all_started, [erleans]}
+    Paths = "-pa " ++ lists:flatten([[Path, " "] || Path <- CodePath]),
+    StartupFuns =  [
+        {logger, set_handler_config, [default, config,
+            #{file => "log/ct_console.log"}
         ]},
-        {erl_flags, ErlFlags}
-    ]),
-    timer:sleep(1000),
+        {logger, set_handler_config, [default, formatter,
+         {logger_formatter, #{}}]},
+        {application, load, [partisan]},
+        {application, load, [bondy_mst]},
+        {application, load, [erleans]},
+        {application, set_env, [partisan, pid_encoding, false]},
+        {application, set_env, [partisan, periodic_enabled, true]},
+        {application, set_env, [partisan, periodic_interval, 100]},
+        {application, set_env, [partisan, peer_port, PeerPort]},
+        {application, ensure_all_started, [partisan]},
+        {application, ensure_all_started, [bondy_mst]},
+        {application, ensure_all_started, [erleans]}
+    ],
 
-    ct:pal("\e[32m Node ~p [OK] \e[0m", [HostNode]),
-    true = net_kernel:connect_node(?NODE_A),
+    ct:log("Starting node ~p from node ~p paths ~p", [Node, node(), Paths]),
+
+    {ok, Pid, HostNode} = peer:start_link(#{
+        name => Node,
+        %% longnames => true,
+        args => [
+            "-config ../../../../test/sys.config",
+            Paths
+        ]
+    }),
+
+    ct:pal("Node ~p [OK]", [HostNode]),
+
+    _ = [peer:call(Pid, M, F, A) || {M, F, A} <- StartupFuns],
+
+    timer:sleep(1000),
+    true = net_kernel:connect_node(Node),
     start_nodes(T, [HostNode | Acc]).
+
 
 
 join_nodes() ->
