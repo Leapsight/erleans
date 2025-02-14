@@ -592,7 +592,7 @@ init(_) ->
     Node = partisan:node(),
     Opts = #{
         store => bondy_mst_store:open(
-            bondy_mst_ets_store, [{name, <<"erleans_pm">>}]
+            bondy_mst_ets_store, sha256, [{name, <<"erleans_pm">>}]
         ),
         merger => fun mst_merge_value/3,
         callback_mod => ?MODULE,
