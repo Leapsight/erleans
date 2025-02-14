@@ -16,7 +16,6 @@ eunit:
 cover:
 	${REBAR} cover
 
-
 node1:
 	${REBAR} as node1 release
 	ERL_NODE_NAME=node1@127.0.0.1 \
