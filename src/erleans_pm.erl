@@ -122,6 +122,8 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 
+-export_type([grain_key/0]).
+
 
 %% TEST API
 -ifdef(TEST).
@@ -716,17 +718,20 @@ handle_call({register_name_test, GrainRef, ProcRef}, _From, State0) ->
 
 handle_call({unregister_name_test, GrainRef, ProcRef}, _From, State0) ->
     %% Used for testing only
-    {Reply, State} = do_unregister_name_test(State0, GrainRef, ProcRef),
+    Key = grain_key(GrainRef),
+    {Reply, State} = do_unregister_name_test(State0, Key, ProcRef),
     {reply, Reply, State};
 
 handle_call({add_test, GrainRef, ProcRef}, _From, State0) ->
     %% Used for testing only
-    State = add(State0, GrainRef, ProcRef, partisan_remote_ref:node(ProcRef)),
+    Key = grain_key(GrainRef),
+    State = add(State0, Key, ProcRef, partisan_remote_ref:node(ProcRef)),
     {reply, ok, State};
 
 handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
     %% Used for testing only
-    State = remove(State0, GrainRef, ProcRef, partisan_remote_ref:node(ProcRef)),
+    Key = grain_key(GrainRef),
+    State = remove(State0, Key, ProcRef, partisan_remote_ref:node(ProcRef)),
     {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
@@ -751,12 +756,12 @@ handle_cast({grove_on_merge, Page}, State0) ->
 
     {noreply, State};
 
-handle_cast({force_unregister_name, GrainRef, ProcRef}, State0) ->
+handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
     case partisan_remote_ref:is_local(ProcRef) of
         true ->
             Pid = partisan_remote_ref:to_pid(ProcRef),
-            {_, State} = do_unregister_name(State0, GrainRef, Pid),
+            {_, State} = do_unregister_name(State0, GrainKey, Pid),
             {noreply, State};
 
         false ->
@@ -803,8 +808,8 @@ terminate(_Reason, State) ->
 
 
 %% @private
-add(#state{} = State, GrainRef, Value) ->
-    add(#state{} = State, GrainRef, Value, partisan:node()).
+add(#state{} = State, GrainKey, Value) ->
+    add(#state{} = State, GrainKey, Value, partisan:node()).
 
 
 %% @private
@@ -826,8 +831,8 @@ add(#state{grove = Grove0} = State, Key, Value, Node) ->
 
 
 %% @private
-remove(#state{} = State, GrainRef, Value) ->
-    remove(#state{} = State, GrainRef, Value, partisan:node()).
+remove(#state{} = State, GrainKey, Value) ->
+    remove(#state{} = State, GrainKey, Value, partisan:node()).
 
 
 %% @private
@@ -874,19 +879,20 @@ monitor_lookup(Pid) ->
 
 
 %% @private
-mst_merge_value(GrainRef, AWSet1, AWSet2) ->
+mst_merge_value(GrainKey, AWSet1, AWSet2) ->
     AWSet = state_awset:merge(AWSet1, AWSet2),
     ?LOG_DEBUG(#{
         description => "Merging values",
+        key => GrainKey,
         rhs => AWSet1,
         lhs => AWSet1,
         result => AWSet
     }),
-    cleanup(GrainRef, AWSet).
+    cleanup(GrainKey, AWSet).
 
 
 %% @private
-cleanup(GrainRef, AWSet0) ->
+cleanup(GrainKey, AWSet0) ->
     Fun = fun
         (ProcRef, {undefined, RemoteReachable0, AWS0}) ->
             case partisan_remote_ref:is_local(ProcRef) of
@@ -905,10 +911,10 @@ cleanup(GrainRef, AWSet0) ->
             {LocalPRef, is_reachable(ProcRef), AWS};
 
         (_, {LocalPRef, true, AWS}) ->
-            case erleans_grain:is_location_right(GrainRef, LocalPRef) of
+            case erleans_grain:is_location_right(GrainKey, LocalPRef) of
                 true ->
                     %% Ask the grain to deactivate
-                    ok = deactivate_grain(GrainRef, LocalPRef),
+                    ok = deactivate_grain(GrainKey, LocalPRef),
                     throw({break, AWS});
 
                 false ->
@@ -1064,7 +1070,8 @@ do_register_name_test(State0, GrainRef, ProcRef) ->
 do_unregister_process(State0, Pid) when is_pid(Pid) ->
     case monitor_lookup(Pid) of
         {Pid, GrainRef, _} ->
-            do_unregister_name(State0, GrainRef, Pid);
+            Key = grain_key(GrainRef),
+            do_unregister_name(State0, Key, Pid);
         undefined ->
             {ok, State0}
     end.
@@ -1075,23 +1082,21 @@ do_unregister_process(State0, Pid) when is_pid(Pid) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
--spec do_unregister_name(t(), GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
+-spec do_unregister_name(t(), GrainKey :: grain_key(), Pid :: pid()) ->
     {ok, t()}.
 
-do_unregister_name(State0, GrainRef, Pid) when is_pid(Pid) ->
+do_unregister_name(State0, GrainKey, Pid) when is_pid(Pid) ->
     %% Demonitor
     ok = demonitor(Pid),
     true = ets:delete(?MONITOR_TAB, Pid),
 
-    Key = grain_key(GrainRef),
     Value = partisan_remote_ref:from_term(Pid),
-    State = remove(State0, Key, Value),
+    State = remove(State0, GrainKey, Value),
     {ok, State}.
 
 
-do_unregister_name_test(State0, GrainRef, ProcRef) ->
-    Key = grain_key(GrainRef),
-    State = remove(State0, Key, ProcRef, partisan:node(ProcRef)),
+do_unregister_name_test(State0, GrainKey, ProcRef) ->
+    State = remove(State0, GrainKey, ProcRef, partisan:node(ProcRef)),
     {ok, State}.
 
 
@@ -1148,8 +1153,8 @@ demonitor(Pid) ->
 deduplicate(Page) ->
     bondy_mst_page:fold(
         Page,
-        fun({GrainRef, AWSet, _Hash}, ok) ->
-            deduplicate(GrainRef, AWSet)
+        fun({GrainKey, AWSet, _Hash}, ok) ->
+            deduplicate(GrainKey, AWSet)
         end,
         ok
     ).
@@ -1157,7 +1162,7 @@ deduplicate(Page) ->
 
 %% @private
 %% We only action on local duplicates. Each peer will do the same.
-deduplicate(GrainRef, AWSet) ->
+deduplicate(GrainKey, AWSet) ->
     %% Check if we have an active local grain for GrainRef
     Fun = fun
         (ProcRef, {undefined, RemoteReachable}) ->
@@ -1173,9 +1178,9 @@ deduplicate(GrainRef, AWSet) ->
             {LocalPRef, is_reachable(ProcRef)};
 
         (_, {LocalPRef, true}) ->
-            case erleans_grain:is_location_right(GrainRef, LocalPRef) of
+            case erleans_grain:is_location_right(GrainKey, LocalPRef) of
                 true ->
-                    ok = deactivate_grain(GrainRef, LocalPRef),
+                    ok = deactivate_grain(GrainKey, LocalPRef),
                     throw(break);
 
                 false ->
@@ -1198,19 +1203,19 @@ deduplicate(GrainRef, AWSet) ->
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
-deactivate_grain(GrainRef, ProcRef) ->
+deactivate_grain(GrainKey, ProcRef) ->
     case erleans_grain:deactivate(ProcRef) of
         ok ->
             ?LOG_NOTICE(#{
                 description => "Succeded to deactivate duplicate",
-                grain => GrainRef,
+                grain => GrainKey,
                 pid => ProcRef
             });
 
         {error, Reason} when Reason == not_found; Reason == not_active ->
             ?LOG_ERROR(#{
                 description => "Failed to deactivate duplicate",
-                grain => GrainRef,
+                grain => GrainKey,
                 pid => ProcRef,
                 reason => Reason
             }),
@@ -1218,13 +1223,13 @@ deactivate_grain(GrainRef, ProcRef) ->
             %% We ask the peer to do it, via a private cast (peer can be us)
             partisan_gen_server:cast(
                 {?MODULE, partisan_remote_ref:node(ProcRef)},
-                {force_unregister_name, GrainRef, ProcRef}
+                {force_unregister_name, GrainKey, ProcRef}
             );
 
         {error, Reason} ->
             ?LOG_ERROR(#{
                 description => "Failed to deactivate duplicate",
-                grain => GrainRef,
+                grain => GrainKey,
                 pid => ProcRef,
                 reason => Reason
             }),
