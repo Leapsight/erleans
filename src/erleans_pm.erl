@@ -122,8 +122,6 @@
 -export([handle_info/2]).
 -export([terminate/2]).
 
--export_type([grain_key/0]).
-
 
 %% TEST API
 -ifdef(TEST).
@@ -911,7 +909,8 @@ cleanup(GrainKey, AWSet0) ->
             {LocalPRef, is_reachable(ProcRef), AWS};
 
         (_, {LocalPRef, true, AWS}) ->
-            case erleans_grain:is_location_right(GrainKey, LocalPRef) of
+            {_, Mod} = GrainKey,
+            case erleans_grain:is_location_right(Mod, LocalPRef) of
                 true ->
                     %% Ask the grain to deactivate
                     ok = deactivate_grain(GrainKey, LocalPRef),
@@ -1178,7 +1177,8 @@ deduplicate(GrainKey, AWSet) ->
             {LocalPRef, is_reachable(ProcRef)};
 
         (_, {LocalPRef, true}) ->
-            case erleans_grain:is_location_right(GrainKey, LocalPRef) of
+            {_, Mod} = GrainKey,
+            case erleans_grain:is_location_right(Mod, LocalPRef) of
                 true ->
                     ok = deactivate_grain(GrainKey, LocalPRef),
                     throw(break);

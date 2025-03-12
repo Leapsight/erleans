@@ -285,13 +285,13 @@ activate_grain(GrainRef=#{placement := Placement}) ->
 
 
 -spec is_location_right(
-    erlans:grain_ref() | erleans_pm:grain_key(), ProcessRef :: partisan_remote_ref:p()) ->
+    erlans:grain_ref() | module(), ProcessRef :: partisan_remote_ref:p()) ->
     boolean().
 
 is_location_right(#{implementing_module := Mod}, ProcessRef) ->
-    erleans_utils:fun_or_default(Mod, is_location_right, 1, [ProcessRef], true);
+    is_location_right(Mod, ProcessRef);
 
-is_location_right({_, Mod}, ProcessRef) ->
+is_location_right(Mod, ProcessRef) ->
     erleans_utils:fun_or_default(Mod, is_location_right, 1, [ProcessRef], true).
 
 
