@@ -13,6 +13,7 @@
          provider/0,
          save/1,
          node/1,
+         options/0,
          deactivated_counter/1,
          activated_counter/1,
          call_counter/1]).
@@ -23,6 +24,10 @@
          handle_cast/2,
          deactivate/1]).
 
+
+-export([is_location_right/1]).
+
+-include_lib("kernel/include/logger.hrl").
 -include_lib("erleans/include/erleans.hrl").
 %% -include("erleans.hrl").
 
@@ -31,6 +36,15 @@ placement() ->
 
 provider() ->
     default.
+
+options() ->
+    #{channel => undefined}.
+
+
+is_location_right(Ref) ->
+    Result = partisan:node(Ref) == 'node1@127.0.0.1',
+    ?LOG_INFO("is_location_right -> ~p", [Result]),
+    Result.
 
 deactivated_counter(Ref) ->
     erleans_grain:call(Ref, deactivated_counter).

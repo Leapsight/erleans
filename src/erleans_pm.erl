@@ -85,12 +85,13 @@
 ]).
 
 -record(state, {
-    grove               ::  bondy_mst_grove:t(),
-    partisan_channel    ::  partisan:channel()
+    grove                   ::  bondy_mst_grove:t(),
+    partisan_channel        ::  partisan:channel(),
+    initial_sync = false    ::  boolean()
 }).
 
--type t()               ::  #state{}.
--type grain_key()       ::  {GrainId :: any(), ImplMod :: module()}.
+-type t()                   ::  #state{}.
+-type grain_key()           ::  {GrainId :: any(), ImplMod :: module()}.
 
 %% API
 -export([start_link/0]).
@@ -103,8 +104,9 @@
 -export([lookup/1]).
 
 %% BONDY_MST_GROVE CALLBACKS
--export([send/2]).
 -export([broadcast/1]).
+-export([on_merge/1]).
+-export([send/2]).
 
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
 -export([broadcast_data/1]).
@@ -139,6 +141,7 @@
 -compile({no_auto_import, [demonitor/1]}).
 -compile({no_auto_import, [demonitor/2]}).
 
+-compile({feature, maybe_expr, enable}).
 
 
 %% =============================================================================
@@ -383,8 +386,11 @@ send(Peer, Message) ->
 
 
 broadcast(Event) ->
-    ?LOG_INFO("Broadcasting event ~p", [Event]),
     partisan:broadcast(Event, ?MODULE).
+
+
+on_merge(Peer) ->
+    partisan_gen_server:cast(?MODULE, {grove_on_merge, Peer}).
 
 
 
@@ -554,7 +560,6 @@ exchange(Peer, Opts) ->
 
 
 
-
 %% =============================================================================
 %% PARTISAN_GEN_SERVER BEHAVIOR CALLBACKS
 %% ============================================================================
@@ -674,7 +679,7 @@ when is_pid(Caller) ->
             [ProcRef|_] ->
                 %% We found at least one active grain that is reachable, so we
                 %% pick it. If there was a local grain registered under GrainRef,
-                %% ProcRef would be it (becuase of ordering guarantee).
+                %% ProcRef would be it (because of ordering guarantee).
                 Error = {error, {already_in_use, ProcRef}},
                 {Error, State0}
         end,
@@ -696,12 +701,13 @@ handle_call({unregister_name, _}, _From, State) ->
 
 handle_call({grove_merge, Event}, _From, State) ->
     Grove = bondy_mst_grove:handle(State#state.grove, Event),
+
     %% Required by Plumtree, but not sure we need this as bondy_mst.
     %% Merges a remote copy of an object record sent via broadcast w/ the
     %% local view for the key contained in the message id. If the remote copy is
     %% causally older than the current data stored then `false' is returned and
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
-    %% generating siblings) and `true' is returned.
+    %% generating siblings) and `true' is areturned.
     Reply = true,
     {reply, Reply, State#state{grove = Grove}};
 
@@ -733,26 +739,27 @@ handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
     {reply, ok, State};
 
 handle_call(_Request, _From, State) ->
-    {reply, ok, State}.
+    {reply, {error, unknown_call}, State}.
 
 
 -spec handle_cast(Request :: term(), State :: t()) ->
     {noreply, NewState :: t()}.
 
+handle_cast({grove_on_merge, _Peer}, #state{initial_sync = false} = State0) ->
+    State1 = remove_stale(State0#state{initial_sync = true}),
+    ok = maybe_deactivate_local_duplicates(State1),
+    %% We perform GC
+    State = State1#state{grove = bondy_mst_grove:gc(State1#state.grove)},
+    {noreply, State};
+
+handle_cast({grove_on_merge, _Peer}, #state{initial_sync = true} = State) ->
+    ok = maybe_deactivate_local_duplicates(State),
+    {noreply, State};
+
 handle_cast({grove_message, Msg}, State) ->
     %% Fwd message to bondy_mst_grove
     Grove = bondy_mst_grove:handle(State#state.grove, Msg),
     {noreply, State#state{grove = Grove}};
-
-handle_cast({grove_on_merge, Page}, State0) ->
-    %% We need to remove any local grains that are being synced that no longer
-    %% live here. This can happen when we have crashed without deleting the
-    %% grains from the grove first. When we restart the other nodes will sync
-    %% the complete view and those grains will re-appear.
-    State = remove_deactivated(State0, Page),
-    ok = deduplicate(Page),
-
-    {noreply, State};
 
 handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
@@ -781,11 +788,12 @@ handle_info({nodeup, _Node}, State) ->
 
 handle_info({'DOWN', MRef, process, Pid, _Info}, State0) when is_pid(Pid) ->
     %% Registered (monitored) grain exit
-    ?LOG_DEBUG("Grain down ~p", [{Pid, MRef}]),
+    ?LOG_INFO("Grain down ~p", [{Pid, MRef}]),
     {_, State} = do_unregister_process(State0, Pid),
     {noreply, State};
 
-handle_info(_, State) ->
+handle_info(Event, State) ->
+    ?LOG_INFO("Received unknown event ~p", [Event]),
     {noreply, State}.
 
 
@@ -829,18 +837,22 @@ add(#state{grove = Grove0} = State, Key, Value, Node) ->
 
 
 %% @private
-remove(#state{} = State, GrainKey, Value) ->
-    remove(#state{} = State, GrainKey, Value, partisan:node()).
+remove(State, GrainKey, Value) ->
+    remove(State, GrainKey, Value, partisan:node()).
 
 
 %% @private
-remove(#state{grove = Grove} = State, Key, Value, Node) ->
-    Grove = grove_remove(Grove, Key, Value, Node),
+remove(State, Key, Value, Node) ->
+    remove(State, Key, Value, Node, #{}).
+
+%% @private
+remove(#state{grove = Grove} = State, Key, Value, Node, Opts) ->
+    Grove = grove_remove(Grove, Key, Value, Node, Opts),
     State#state{grove = Grove}.
 
 
 %% @private
-grove_remove(Grove, Key, Value, Node) ->
+grove_remove(Grove, Key, Value, Node, Opts) ->
     Tree = bondy_mst_grove:tree(Grove),
     AWSet1 =
         case bondy_mst:get(Tree, Key) of
@@ -851,7 +863,7 @@ grove_remove(Grove, Key, Value, Node) ->
                 AWSet0
         end,
     {ok, AWSet} = state_type:mutate({rmv, Value}, Node, AWSet1),
-    bondy_mst_grove:put(Grove, Key, AWSet).
+    bondy_mst_grove:put(Grove, Key, AWSet, Opts).
 
 
 %% @private
@@ -878,119 +890,135 @@ monitor_lookup(Pid) ->
 
 %% @private
 mst_merge_value(GrainKey, AWSet1, AWSet2) ->
-    AWSet = state_awset:merge(AWSet1, AWSet2),
+    %% We merge de CRDTs
+    AWSet3 = state_awset:merge(AWSet1, AWSet2),
+    %% We remove local grains that have been deactivated
+    AWSet = remove_deactivated(AWSet3),
     ?LOG_DEBUG(#{
-        description => "Merging values",
+        description => "Merged values",
         key => GrainKey,
         rhs => AWSet1,
-        lhs => AWSet1,
+        lhs => AWSet2,
         result => AWSet
     }),
-    cleanup(GrainKey, AWSet).
+    ok = maybe_deactivate_local_duplicate(GrainKey, AWSet),
+    AWSet.
 
 
 %% @private
-cleanup(GrainKey, AWSet0) ->
-    Fun = fun
-        (ProcRef, {undefined, RemoteReachable0, AWS0}) ->
-            case partisan_remote_ref:is_local(ProcRef) of
-                true ->
-                    {LocalPref, AWS} = cleanup_deactivated(ProcRef, AWS0),
-                    {LocalPref, RemoteReachable0, AWS};
+-spec remove_deactivated(state_awset:state_awset()) ->
+    state_awset:state_awset().
 
-                false ->
-                    RemoteReachable =
-                        RemoteReachable0 orelse is_reachable(ProcRef),
-
-                    {undefined, RemoteReachable, AWS0}
-            end;
-
-        (ProcRef, {LocalPRef, false, AWS}) ->
-            {LocalPRef, is_reachable(ProcRef), AWS};
-
-        (_, {LocalPRef, true, AWS}) ->
-            {_, Mod} = GrainKey,
-            case erleans_grain:is_location_right(Mod, LocalPRef) of
-                true ->
-                    %% Ask the grain to deactivate
-                    ok = deactivate_grain(GrainKey, LocalPRef),
-                    throw({break, AWS});
-
-                false ->
-                    throw({break, AWS})
-            end
-
-    end,
-
-    try
-        {_, _, AWSet1} = sets:fold(
-            Fun, {undefined, false, AWSet0}, state_awset:query(AWSet0)
-        ),
-        AWSet1
-    catch
-        throw:{break, AWSet2} ->
-            AWSet2
-    end.
-
-
-cleanup_deactivated(ProcRef, AWS0) ->
-    case is_monitored(partisan_remote_ref:to_pid(ProcRef)) of
-        true ->
-            {ProcRef, AWS0};
-
-        false ->
-            %% No longer exists here, so we remove
+remove_deactivated(AWSet) ->
+    Fun = fun(ProcRef, Acc) ->
+        maybe
+            true ?= partisan_remote_ref:is_local(ProcRef),
+            Pid ?= partisan_remote_ref:to_pid(ProcRef),
+            undefined ?= monitor_lookup(Pid),
+            %% Not monitored so it has been deactivated i.e. the peer node has a
+            %% stale entry. We remove it from the set.
             ?LOG_DEBUG(#{
                 message => "Removing grain from registry",
+                process_ref => ProcRef,
                 reason => deactivated
             }),
-            {undefined, awset_remove(AWS0, ProcRef)}
+            awset_remove(Acc, ProcRef)
+        else
+            false ->
+                %% Not local, so we ignore it
+                Acc;
+
+            {_Pid, _GrainRef, _Mref} ->
+                %% Monitored, so we ignore it
+                Acc
+
+        end
+    end,
+    sets:fold(Fun, AWSet, state_awset:query(AWSet)).
+
+
+%% This function assumes remove_deactivated/2 was called on AWSet before.
+maybe_deactivate_local_duplicate(GrainKey, AWSet) ->
+    All = sets:to_list(state_awset:query(AWSet)),
+
+    maybe
+        %% Partition based on locality
+        {[ProcRef], [_, _] = Remotes} ?=
+            lists:partition(fun partisan_remote_ref:is_local/1, All),
+        %% We have duplicates, so we need to check if our local duplicate should
+        %% belong here.
+        false ?= safe_is_location_right(GrainKey, ProcRef),
+        %% The grain should not be here, so we will deactivate but only if
+        %% we can reach any of the remote duplicates
+        true ?= lists:any(fun ?MODULE:is_reachable/1, Remotes),
+        %% Since at least one remote grain is reachable, we deactivate the
+        %% local one
+        deactivate_grain(GrainKey, ProcRef)
+    else
+        _ ->
+            ok
     end.
 
 
 %% @private
-remove_deactivated(#state{} = State, Page) ->
-    bondy_mst_page:fold(
-        Page,
-        fun({Key, AWSet, _Hash}, Acc) ->
-            remove_deactivated(Acc, Key, AWSet)
-        end,
-        State
-    ).
+maybe_deactivate_local_duplicates(#state{grove = Grove}) ->
+    Tree = bondy_mst_grove:tree(Grove),
+    Fun = fun({Key, AWSet}) -> maybe_deactivate_local_duplicate(Key, AWSet) end,
+    bondy_mst:foreach(Tree, Fun).
 
 
 %% @private
-remove_deactivated(State, Key, AWSet) ->
+safe_is_location_right({_, Mod}, LocalPRef) ->
+    try
+        erleans_grain:is_location_right(Mod, LocalPRef)
+    catch
+        Class:Reason:Stacktrace ->
+            ?LOG_WARNING(#{
+                message =>
+                    "erleans_grain:is_location_right/2 failed. "
+                    "Returning true by default",
+                implementing_module => Mod,
+                process_ref => LocalPRef,
+                class => Class,
+                reason => Reason,
+                stacktrace => Stacktrace
+            }),
+            true
+    end.
+
+
+remove_stale(#state{grove = Grove} = State) ->
+    Tree = bondy_mst_grove:tree(Grove),
+    Fun = fun({Key, AWSet}, Acc) -> remove_stale(Acc, Key, AWSet) end,
+    bondy_mst:fold(Tree, Fun, State).
+
+
+%% @private
+remove_stale(State, Key, AWSet) ->
     Set = state_awset:query(AWSet),
-
-    sets:fold(
-        fun(ProcRef, Acc) ->
-            case partisan_remote_ref:is_local(ProcRef) of
-                true ->
-                    Pid = partisan_remote_ref:to_term(ProcRef),
-
-                    case monitor_lookup(Pid) of
-                        {Pid, _GrainRef, _} ->
-                            Acc;
-
-                        undefined ->
-                            ?LOG_INFO(#{
-                                message => "Removing grain from registry",
-                                reason => deactivated
-                            }),
-                            %% No longer exists here, so we remove
-                            remove(Acc, Key, ProcRef)
-                    end;
-
-                false ->
-                    Acc
-            end
-        end,
-        State,
-        Set
-    ).
+    Fun = fun(ProcRef, Acc) ->
+        maybe
+            true ?= partisan_remote_ref:is_local(ProcRef),
+            Pid ?= partisan_remote_ref:to_pid(ProcRef),
+            undefined ?= monitor_lookup(Pid),
+            %% Not monitored so it has been deactivated i.e. the peer node has a
+            %% stale entry. We remove it from the set.
+            ?LOG_DEBUG(#{
+                message => "Removing grain from registry",
+                process_ref => ProcRef,
+                reason => deactivated
+            }),
+            %% We disable broadcasting
+            remove(Acc, Key, ProcRef, partisan:node(), #{broadcast => false})
+        else
+            false ->
+                Acc
+        end
+    end,
+    sets:fold(Fun, State, Set).
 
 
+%% @private
 sort_conflicting_values(AWSet) ->
     Set = state_awset:query(AWSet),
     lists:sort(
@@ -1148,69 +1176,23 @@ demonitor(Pid) ->
     end.
 
 
-%% @private
-deduplicate(Page) ->
-    bondy_mst_page:fold(
-        Page,
-        fun({GrainKey, AWSet, _Hash}, ok) ->
-            deduplicate(GrainKey, AWSet)
-        end,
-        ok
-    ).
-
-
-%% @private
-%% We only action on local duplicates. Each peer will do the same.
-deduplicate(GrainKey, AWSet) ->
-    %% Check if we have an active local grain for GrainRef
-    Fun = fun
-        (ProcRef, {undefined, RemoteReachable}) ->
-            case partisan_remote_ref:is_local(ProcRef) of
-                true ->
-                   {ProcRef, RemoteReachable};
-
-                false ->
-                    {undefined, RemoteReachable orelse is_reachable(ProcRef)}
-            end;
-
-        (ProcRef, {LocalPRef, false}) ->
-            {LocalPRef, is_reachable(ProcRef)};
-
-        (_, {LocalPRef, true}) ->
-            {_, Mod} = GrainKey,
-            case erleans_grain:is_location_right(Mod, LocalPRef) of
-                true ->
-                    ok = deactivate_grain(GrainKey, LocalPRef),
-                    throw(break);
-
-                false ->
-                    throw(break)
-            end
-
-    end,
-
-    try
-        _ = sets:fold(Fun, {undefined, false}, state_awset:query(AWSet)),
-        ok
-    catch
-        throw:break ->
-            ok
-    end.
-
-
 %% -----------------------------------------------------------------------------
 %% @private
 %% @doc
 %% @end
 %% -----------------------------------------------------------------------------
+-spec deactivate_grain(grain_key(), partisan_remote_ref:t()) -> ok.
+
 deactivate_grain(GrainKey, ProcRef) ->
+    %% This call is async (uses a cast) so we are safe to do it
     case erleans_grain:deactivate(ProcRef) of
         ok ->
             ?LOG_NOTICE(#{
                 description => "Succeded to deactivate duplicate",
                 grain => GrainKey,
                 pid => ProcRef
-            });
+            }),
+            ok;
 
         {error, Reason} when Reason == not_found; Reason == not_active ->
             ?LOG_ERROR(#{

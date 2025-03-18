@@ -5,7 +5,7 @@
            ]},
 
  {partisan, [
-  {exchange_tick_period, 60000},
+  {exchange_tick_period, 2000},
    {peer_port, ${PARTISAN_PEER_PORT}},
    {pid_encoding, false},
    {ref_encoding, false},
