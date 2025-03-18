@@ -22,7 +22,7 @@ groups() ->
         {main, [], [
             register_name,
             whereis_name,
-            already_in_use,
+            %% already_in_use,
             stale_local_entry,
             unreachable_remote_entry,
             reachable_stale_remote_entry
@@ -97,17 +97,17 @@ whereis_name(Config) ->
     erleans_grain:deactivate(GrainRef).
 
 
-already_in_use(Config) ->
-    GrainRef = ?config(grainref, Config),
+%% already_in_use(Config) ->
+%%     GrainRef = ?config(grainref, Config),
 
-    %% We simulate duplicate registrations
-    %% ok = erleans_pm:register_name_(GrainRef, partisan:self()),
+%%     %% We simulate duplicate registrations
+%%     ok = erleans_pm:register_name_(GrainRef, partisan:self()),
 
-    %% ?assertMatch(
-    %%     {error, {already_in_use, _}},
-    %%     erleans_pm:register_name_(GrainRef, partisan:self())
-    %% ).
-    ok.
+%%     ?assertMatch(
+%%         {error, {already_in_use, _}},
+%%         erleans_pm:register_name_(GrainRef, partisan:self())
+%%     ),
+%%     ok.
 
 
 
