@@ -11,6 +11,7 @@
 
 -export([placement/0,
          provider/0,
+         options/0,
          save/1,
          node/1,
          stop/1,
@@ -33,6 +34,9 @@
 
 placement() ->
     prefer_local.
+
+options() ->
+    #{channel => undefined}.
 
 provider() ->
     default.

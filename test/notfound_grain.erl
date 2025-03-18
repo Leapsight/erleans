@@ -11,6 +11,7 @@
 
 -export([placement/0,
          provider/0,
+         options/0,
          anything/1]).
 
 -export([activate/2,
@@ -25,6 +26,9 @@ placement() ->
 
 provider() ->
     default.
+
+options() ->
+    #{channel => undefined}.
 
 anything(Ref) ->
     erleans_grain:call(Ref, anything).

@@ -11,6 +11,7 @@
 
 -export([placement/0,
          provider/0,
+         options/0,
          save/1,
          node/1,
          deactivated_counter/1,
@@ -31,6 +32,9 @@ placement() ->
 
 provider() ->
     default.
+
+options() ->
+    #{channel => undefined}.
 
 deactivated_counter(Ref) ->
     erleans_grain:call(Ref, deactivated_counter).

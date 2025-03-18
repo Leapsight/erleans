@@ -10,6 +10,7 @@
 -behaviour(erleans_grain).
 
 -export([placement/0,
+         options/0,
          hello/1,
          save/1]).
 
@@ -22,6 +23,9 @@
 
 placement() ->
     prefer_local.
+
+options() ->
+    #{channel => undefined}.
 
 hello(Ref) ->
     erleans_grain:call(Ref, hello).

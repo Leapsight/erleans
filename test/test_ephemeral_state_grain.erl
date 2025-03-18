@@ -18,6 +18,7 @@
          activated_counter/1]).
 
 -export([placement/0,
+         options/0,
          provider/0,
          state/1,
          activate/2,
@@ -32,6 +33,9 @@ placement() ->
 
 provider() ->
     in_memory.
+
+options() ->
+    #{channel => undefined}.
 
 deactivated_counter(Ref) ->
     erleans_grain:call(Ref, deactivated_counter).

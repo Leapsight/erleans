@@ -11,6 +11,7 @@
 
 -export([placement/0,
          provider/0,
+         options/0,
          node/1,
          deactivated_counter/1,
          activated_counter/1,
@@ -28,6 +29,9 @@
 
 placement() ->
     {stateless, 3}.
+
+options() ->
+    #{channel => undefined}.
 
 provider() ->
     ets.
