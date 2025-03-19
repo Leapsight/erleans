@@ -509,7 +509,7 @@ is_stale(Event) ->
 -spec graft(MessageId :: any()) ->
     stale | {ok, state_awset:state_awset()} | {error, term()}.
 
-graft({Event, undefined}) ->
+graft(Event) ->
     Tree = ?TREE,
     {Key, Value1} = bondy_mst_grove:gossip_data(Event),
 
@@ -533,7 +533,11 @@ graft({Event, undefined}) ->
                 false ->
                     {ok, Value0}
             end
-    end.
+    end;
+
+graft(Msg) ->
+    ?LOG_INFO("Unhandled message ~p", [Msg]),
+    {error, {unknown_event, Msg}}.
 
 
 %% -----------------------------------------------------------------------------
@@ -749,7 +753,8 @@ handle_cast({grove_on_merge, _Peer}, #state{initial_sync = false} = State0) ->
     State1 = remove_stale(State0#state{initial_sync = true}),
     ok = maybe_deactivate_local_duplicates(State1),
     %% We perform GC
-    State = State1#state{grove = bondy_mst_grove:gc(State1#state.grove)},
+    %% State = State1#state{grove = bondy_mst_grove:gc(State1#state.grove)},
+    State = State1,
     {noreply, State};
 
 handle_cast({grove_on_merge, _Peer}, #state{initial_sync = true} = State) ->
@@ -779,6 +784,9 @@ handle_cast(_Request, State) ->
 
 -spec handle_info(Message :: term(), State :: t()) ->
     {noreply, NewState :: t()}.
+
+handle_info({'ETS-TRANSFER', erleans_pm_monitor, _, []}, State) ->
+    {noreply, State};
 
 handle_info({nodedown, _Node}, State) ->
     {noreply, State};
@@ -1011,7 +1019,7 @@ remove_stale(State, Key, AWSet) ->
             %% We disable broadcasting
             remove(Acc, Key, ProcRef, partisan:node(), #{broadcast => false})
         else
-            false ->
+            _ ->
                 Acc
         end
     end,
