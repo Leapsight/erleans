@@ -65,6 +65,9 @@
 %% @end
 %% -----------------------------------------------------------------------------
 -module(erleans_pm).
+
+-feature(maybe_expr, enable).
+
 -behaviour(bondy_mst_grove).
 -behaviour(partisan_gen_server).
 -behaviour(partisan_plumtree_broadcast_handler).
@@ -143,8 +146,6 @@
 -compile({no_auto_import, [monitor/3]}).
 -compile({no_auto_import, [demonitor/1]}).
 -compile({no_auto_import, [demonitor/2]}).
-
--compile({feature, maybe_expr, enable}).
 
 
 %% =============================================================================
