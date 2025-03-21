@@ -92,7 +92,10 @@
 
 -type t()                   ::  #state{}.
 -type grain_key()           ::  {GrainId :: any(), ImplMod :: module()}.
-
+-type gossip_id()           ::  {
+                                    Peer :: bondy_mst_grove:node_id(),
+                                    Root :: bondy_mst:hash()
+                                }.
 %% API
 -export([start_link/0]).
 -export([register_name/0]).
@@ -385,8 +388,8 @@ send(Peer, Message) ->
     partisan_gen_server:cast({?MODULE, Peer}, {grove_message, Message}).
 
 
-broadcast(Event) ->
-    partisan:broadcast(Event, ?MODULE).
+broadcast(Gossip) ->
+    partisan:broadcast(Gossip, ?MODULE).
 
 
 on_merge(Peer) ->
@@ -420,12 +423,15 @@ broadcast_channel() ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec broadcast_data(bondy_mst_grove:gossip()) ->
-    {MessageId :: any(), Payload :: any()}.
+-spec broadcast_data(Gossip :: bondy_mst_grove:gossip()) ->
+    {
+        MessageId :: {bondy_mst_grove:node_id(), bondy_mst:hash()},
+        Payload :: bondy_mst_grove:gossip()
+    }.
 
-broadcast_data(Event) ->
-    %% We use the whole event as messageID
-    {Event, undefined}.
+broadcast_data(Gossip) ->
+    #{from := Peer, root := Root} = bondy_mst_grove:gossip_data(Gossip),
+    {{Peer, Root}, Gossip}.
 
 
 %% -----------------------------------------------------------------------------
@@ -440,11 +446,11 @@ broadcast_data(Event) ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec merge(MessageId :: any(), Payload :: any()) -> boolean().
+-spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_grove:gossip()) ->
+    boolean().
 
-merge(Event, undefined) ->
-    %% @TODO stop grains that are no longer here to be re-registered via a sync
-    partisan_gen_server:call(?MODULE, {grove_merge, Event}).
+merge(_Id, Gossip) ->
+    partisan_gen_server:call(?MODULE, {grove_merge, Gossip}).
 
 
 %% -----------------------------------------------------------------------------
@@ -455,41 +461,41 @@ merge(Event, undefined) ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec merge(Peer :: node(), MessageId :: any(), Payload :: any()) -> boolean().
+-spec merge(
+    Peer :: node(),
+    Root :: bondy_mst:hash(),
+    Payload :: bondy_mst_grove:gossip()) -> boolean().
 
-merge(Peer, Event, undefined) ->
-    partisan_gen_server:call({?MODULE, Peer}, {grove_merge, Event}).
+merge(Peer, _Root, Gossip) ->
+    partisan_gen_server:call({?MODULE, Peer}, {grove_merge, Gossip}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Determines if the given context (version vector) is causually newer than
-%% an existing object. If the object missing or if the context does not represent
-%% an anscestor of the current key, false is returned. Otherwise, when the
-%% context does represent an ancestor of the existing object or the existing
-%% object itself, true is returned.
-%%
-%%
-%% > This function is part of the implementation of the
-%% partisan_plumtree_broadcast_handler behaviour.
-%% > You should never call it directly.
-%% @end
-%% -----------------------------------------------------------------------------
--spec is_stale(MessageId :: any()) -> boolean().
+?DOC("""
+When a peer broadcasts a message it does it to the nodes in its eager-push set
+only, but also simultaneously sends I_HAVE notifications to nodes in its
+lazy-push set instead of the entire message. This callback is the one that
+Plumtree calls when receiving an I_HAVE message.
 
-is_stale(Event) ->
-    {Key, Value1} = bondy_mst_grove:gossip_data(Event),
+The main idea is:
+“I have seen a broadcast message with this root. If you need it, let me know.”
 
-    case bondy_mst:get(?TREE, Key) of
-        undefined ->
-            %% @TODO Maybe stop grains that are no longer here to be
-            %% re-registered via a sync. Can we do this here?
-            false;
+This saves bandwidth, because instead of blindly sending every neighbor the full
+payload, the node sends just the root hash. The lazy neighbors can decide
+whether they need the full message or not.
 
-        Value0 ->
-            %% Checks if Value1 is an inflation of Value0, i.e. Value0 is an
-            %% ancestor of Value1
-            state_type:is_inflation(Value0, Value1)
-    end.
+In our case the I_HAVE message is the root of the peer's tree, so we always
+return `true` signaling Plumtree that we do not need the message, and we send
+ourself a message to potentially init a merge with the peer.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
+-spec is_stale(gossip_id()) -> boolean().
+
+is_stale({Peer, Root}) ->
+    ok = partisan_gen_server:cast(?MODULE, {grove_maybe_merge, Peer, Root}),
+    true.
 
 
 %% -----------------------------------------------------------------------------
@@ -506,38 +512,11 @@ is_stale(Event) ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec graft(MessageId :: any()) ->
+-spec graft(gossip_id()) ->
     stale | {ok, state_awset:state_awset()} | {error, term()}.
 
-graft(Event) ->
-    Tree = ?TREE,
-    {Key, Value1} = bondy_mst_grove:gossip_data(Event),
-
-    case bondy_mst:get(Tree, Key) of
-        undefined ->
-            %% There would have to be a serious error in implementation to hit
-            %% this case.
-            %% Catch it here b/c it would be much harder to detect
-            {error, {not_found, Key}};
-
-         Value0 ->
-            %% when grafting the context will never be causally newer
-            %% than what we have locally. Since its not equal,
-            %% it must be an ancestor. Thus we've sent another, newer
-            %% update that contains this context's information in
-            %% addition to its own.  This graft is deemed stale
-            case state_type:is_inflation(Value0, Value1) of
-                true ->
-                    stale;
-
-                false ->
-                    {ok, Value0}
-            end
-    end;
-
-graft(Msg) ->
-    ?LOG_INFO("Unhandled message ~p", [Msg]),
-    {error, {unknown_event, Msg}}.
+graft({Peer, Root}) ->
+    partisan_gen_server:call(?MODULE, {grove_graft, Peer, Root}).
 
 
 %% -----------------------------------------------------------------------------
@@ -703,22 +682,6 @@ handle_call({unregister_name, _}, _From, State) ->
     %% A call from a remote node, now allowed
     {reply, {error, not_local}, State};
 
-handle_call({grove_merge, Event}, _From, State) ->
-    Grove = bondy_mst_grove:handle(State#state.grove, Event),
-
-    %% Required by Plumtree, but not sure we need this as bondy_mst.
-    %% Merges a remote copy of an object record sent via broadcast w/ the
-    %% local view for the key contained in the message id. If the remote copy is
-    %% causally older than the current data stored then `false' is returned and
-    %% no updates are merged. Otherwise, the remote copy is merged (possibly
-    %% generating siblings) and `true' is areturned.
-    Reply = true,
-    {reply, Reply, State#state{grove = Grove}};
-
-handle_call({grove_trigger, Peer, _Opts}, _From, State) ->
-    Reply = bondy_mst_grove:trigger(State#state.grove, Peer),
-    {reply, Reply, State};
-
 handle_call({register_name_test, GrainRef, ProcRef}, _From, State0) ->
     %% Used for testing only
     {Reply, State} = do_register_name_test(State0, GrainRef, ProcRef),
@@ -742,6 +705,35 @@ handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
     State = remove(State0, Key, ProcRef, partisan_remote_ref:node(ProcRef)),
     {reply, ok, State};
 
+handle_call({grove_merge, Gossip}, _From, State) ->
+    Grove = bondy_mst_grove:handle(State#state.grove, Gossip),
+
+    %% Required by Plumtree.
+    %% Merges a remote copy of an object record sent via broadcast w/ the
+    %% local view for the key contained in the message id. If the remote copy is
+    %% causally older than the current data stored then `false' is returned and
+    %% no updates are merged. Otherwise, the remote copy is merged (possibly
+    %% generating siblings) and `true' is returned.
+    %% Since we will performing a merge if required during
+    %% bondy_mst_grove:handle/2 we reply `true'.
+    Reply = true,
+    {reply, Reply, State#state{grove = Grove}};
+
+handle_call({grove_trigger, Peer, _Opts}, _From, State) ->
+    Reply = bondy_mst_grove:trigger(State#state.grove, Peer),
+    {reply, Reply, State};
+
+handle_call({grove_graft, Peer, Root}, _From, State) ->
+    Reply =
+        case bondy_mst_grove:is_stale(State#state.grove, Root) of
+            true ->
+                stale;
+
+            false ->
+                bondy_mst_grove:gossip_message(Peer, Root)
+        end,
+    {reply, Reply, State};
+
 handle_call(_Request, _From, State) ->
     {reply, {error, unknown_call}, State}.
 
@@ -749,12 +741,14 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Request :: term(), State :: t()) ->
     {noreply, NewState :: t()}.
 
+handle_cast({grove_maybe_merge, Peer, Root}, State) ->
+    bondy_mst_grove:is_stale(State#state.grove, Root) andalso
+        bondy_mst_grove:trigger(State#state.grove, Peer),
+    {noreply, State};
+
 handle_cast({grove_on_merge, _Peer}, #state{initial_sync = false} = State0) ->
-    State1 = remove_stale(State0#state{initial_sync = true}),
-    ok = maybe_deactivate_local_duplicates(State1),
-    %% We perform GC
-    %% State = State1#state{grove = bondy_mst_grove:gc(State1#state.grove)},
-    State = State1,
+    State = remove_stale(State0#state{initial_sync = true}),
+    ok = maybe_deactivate_local_duplicates(State),
     {noreply, State};
 
 handle_cast({grove_on_merge, _Peer}, #state{initial_sync = true} = State) ->
@@ -853,9 +847,10 @@ remove(State, GrainKey, Value) ->
 remove(State, Key, Value, Node) ->
     remove(State, Key, Value, Node, #{}).
 
+
 %% @private
-remove(#state{grove = Grove} = State, Key, Value, Node, Opts) ->
-    Grove = grove_remove(Grove, Key, Value, Node, Opts),
+remove(#state{grove = Grove0} = State, Key, Value, Node, Opts) ->
+    Grove = grove_remove(Grove0, Key, Value, Node, Opts),
     State#state{grove = Grove}.
 
 

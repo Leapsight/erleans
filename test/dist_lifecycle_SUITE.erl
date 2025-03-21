@@ -60,7 +60,7 @@ end_per_suite(_Config) ->
 
 
 
-manual_start_stop(Config) ->
+manual_start_stop(_Config) ->
     ok = join_nodes(),
     Grain1 = erleans:get_grain(test_grain, <<"grain1">>),
     Grain2 = erleans:get_grain(test_grain, <<"grain2">>),
@@ -110,7 +110,7 @@ activate_callback(_Config) ->
     ?assertEqual({ok, Expected}, test_grain:node(Grain3)).
 
 
-deduplication(Config) ->
+deduplication(_Config) ->
     GrainRef = erleans:get_grain(test_grain, <<"grain1">>),
 
     %% We create duplicate
@@ -123,7 +123,7 @@ deduplication(Config) ->
         rpc:call(?NODE_A, test_grain, activated_counter, [GrainRef])
     ),
 
-    [LocalProcRef] = erleans_pm:lookup(GrainRef),
+    [_LocalProcRef] = erleans_pm:lookup(GrainRef),
     [RemoteProcRef] = rpc:call(?NODE_A, erleans_pm, lookup, [GrainRef]),
 
     %% We override NODE_CT's functions so that we define RemoteProcRef to be

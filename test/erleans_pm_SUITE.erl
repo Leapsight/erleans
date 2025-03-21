@@ -111,7 +111,7 @@ whereis_name(Config) ->
 
 
 
-stale_local_entry(Config) ->
+stale_local_entry(_Config) ->
     GrainRef = #{id => <<"test_grain">>,
         implementing_module => erleans_dummy_grain,
         placement => prefer_local,
