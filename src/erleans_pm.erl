@@ -258,8 +258,9 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
 
 
 ?DOC("""
-Lookups all the registered grains under name `GrainRef` using the
-local ets-based materialised view.
+Lookups all the registered grains under name `GrainRef` and returns a list of
+registered references for the ref.
+The list sorts local references first.
 """).
 -spec lookup(GrainRef :: erleans:grain_ref() | grain_key()) ->
     [partisan_remote_ref:p()].
@@ -278,12 +279,13 @@ lookup({_, _} = GrainKey) ->
 
 
 ?DOC("""
-Returns the `erleans:grain_ref` for a Pid. This is more efficient than
-`erleans_grain:grain_ref` as it is not calling the grain (which might
-be busy handling signals) for local grains but using this module's ets table.
+Returns the `erleans:grain_ref` for a pid or Partisan process reference.
+This is more efficient than `erleans_grain:grain_ref` as it doesn't call the
+grain process for local grains, which might be busy handling signals, but
+instead uses this module's ets table used for monitoring.
 
-In case of a remote reference, this incurs in an RPC to the peer node's where
-the grain is activated.
+In case of a remote reference, this incurs in an RPC to the peer node where the
+grain is activated.
 """).
 -spec grain_ref(partisan:any_pid()) ->
     {ok, erleans:grain_ref()} | {error, timeout | any()}.
@@ -329,7 +331,13 @@ to_list() ->
     to_list([safe]).
 
 
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the list of all registry entries.
+
+## Options
+* `safe` - returns only entries for grains that are known to be alive
+* `unsafe` - returns all entries without checking for liveness.
+""").
 -spec to_list([safe | unsafe]) -> [{grain_key(), partisan_remote_ref:p()}].
 
 to_list([Flag]) ->
@@ -355,7 +363,6 @@ to_list([Flag]) ->
     lists:reverse(L).
 
 
-
 ?DOC("""
 Triggers a synchronisation exchange with a peer.
 Calls `exchange/2` with an empty map as the second argument.
@@ -372,7 +379,7 @@ Triggers a synchronisation exchange with a peer.
 -spec sync(node(), map()) -> ok | {error, term()}.
 
 sync(Peer, Opts) ->
-    partisan_gen_server:call(?MODULE, {crdt_sync, Peer, Opts}).
+    partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
 
 
 
@@ -411,9 +418,8 @@ broadcast_channel() ->
 
 
 ?DOC("""
-Deconstructs a broadcast that is sent using
-`broadcast/2` as the handling module returning the message id
-and payload.
+Deconstructs a broadcast that is sent using `broadcast/2` returning the message
+id and payload.
 
 > This function is part of the implementation of the
 partisan_plumtree_broadcast_handler behaviour.
@@ -477,9 +483,6 @@ This saves bandwidth, because instead of blindly sending every neighbor the full
 payload, the node sends just the root hash. The lazy neighbors can decide
 whether they need the full message or not.
 
-In our case the I_HAVE message is the root of the peer's tree, so we always
-return `true` signaling Plumtree that we do not need the message, and we send
-ourself a message to potentially init a merge with the peer.
 
 > This function is part of the implementation of the
 partisan_plumtree_broadcast_handler behaviour.
@@ -488,14 +491,19 @@ partisan_plumtree_broadcast_handler behaviour.
 -spec is_stale(gossip_id()) -> boolean().
 
 is_stale({Peer, Root}) ->
+    %% In our case the I_HAVE message is the root of the peer's tree, so we
+    %% always return `true` signaling Plumtree that we do not need the message,
+    %% and we send ourself a message to potentially init a merge with the peer
+    %% i.e. in this case we take the job of synchonising the CRDT in out hands
+    %% instead of relying on Plumtree.
     ok = partisan_gen_server:cast(?MODULE, {crdt_maybe_merge, Peer, Root}),
     true.
 
 
 ?DOC("""
-Returns the object associated with the given prefixed key `Pkey` and
-context `Context` (message id) if the currently stored version has an equal
-context. Otherwise returns the atom `stale`.
+In Plumtree this is used to return the object associated with the given prefixed
+message id if the currently stored version has an equal context. Otherwise
+returning the atom `stale`.
 
 Because it assumes that a grafted context can only be causally older than
 the local view, a `stale` response means there is another message that
@@ -509,6 +517,9 @@ partisan_plumtree_broadcast_handler behaviour.
     stale | {ok, state_awset:state_awset()} | {error, term()}.
 
 graft({Peer, Root}) ->
+    %% In our case, the message_id is just the peer's root hash, so in case
+    %% we contain the root we return a Gossip message with our root. Otherwise
+    %% we return 'stale'.
     partisan_gen_server:call(?MODULE, {crdt_graft, Peer, Root}).
 
 
@@ -709,7 +720,7 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     Reply = true,
     {reply, Reply, State#state{crdt = CRDT}};
 
-handle_call({crdt_sync, Peer, _Opts}, _From, State) ->
+handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
     Reply = bondy_mst_crdt:trigger(State#state.crdt, Peer),
     {reply, Reply, State};
 
