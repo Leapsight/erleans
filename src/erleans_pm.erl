@@ -15,55 +15,6 @@
 %% limitations under the License.
 %% -----------------------------------------------------------------------------
 
-%% -----------------------------------------------------------------------------
-%% @doc This module implements the `erleans_pm' server process, the Erleans
-%% grain process registry as a State-based CRDT.
-%%
-%% The server state consists of the following elements:
-%% <ul>
-%% <li>
-%% A set of local monitor references with form
-%% `{pid(), erleans:grain_ref(), reference()}' for every local registration.
-%% This is stored in a protected @{link ets} `set' table managed by the
-%% {@link erleans_table_owner} process to ensure the table survives this
-%% server's crashes.
-%% </li>
-%% <li>
-%% A distributed and globally-replicated set of mappings from
-%% {@link grain_key()} to a single {@link partisan_remote_ref:p()}.
-%% This is stored on {@link bondy_mst}.
-%% </li>
-%% </ul>
-%%
-%% == Controls ==
-%% <ul>
-%% <li>
-%% A grain registers itself and can only do it using its
-%% {@link erleans:grain_ref()} as name. This is ensured by this server by
-%% calling {@link erleans_grain:grain_ref()} on the process calling the
-%% function {register_name/0}. There is no provision in the API for a process to
-%% register another process.
-%% </li>
-%% <li>
-%% A grain unregisters itself. There is no provision in the API for a process to
-%% unregister another process.
-%% </li>
-%% </ul>
-%%
-%% == Events ==
-%% <ul>
-%% <li>
-%% A local registered grain `DOWN` signal is received.
-%% </li>
-%% </ul>
-%%
-%% == Garbage Collection ==
-%% * Tombstones are not garbage collected but this is not a major problem as we
-%% use the `grain_ref()' as key for the MST, so the size of the MST is always
-%% bounded to the max number of grains that ever existed. In the near future we
-%% will support tombstone removal.
-%% @end
-%% -----------------------------------------------------------------------------
 -module(erleans_pm).
 
 -feature(maybe_expr, enable).
@@ -75,6 +26,42 @@
 -include_lib("kernel/include/logger.hrl").
 -include_lib("partisan/include/partisan.hrl").
 -include("erleans.hrl").
+
+-moduledoc #{format => "text/markdown"}.
+?MODULEDOC("""
+This module implements the `erleans_pm` server process, the Erleans
+grain process registry as a State-based CRDT.
+
+The server state consists of the following elements:
+* A set of local monitor references with form
+`{pid(), erleans:grain_ref(), reference()}` for every local registration.
+This is stored in a protected `ets` set table managed by the
+`erleans_table_owner` process to ensure the table survives this
+server's crashes.
+* A distributed and globally-replicated set of mappings from
+`grain_key()` to a single `partisan_remote_ref:p()`.
+This is stored on `bondy_mst`.
+
+## Controls
+* A grain registers itself and can only do it using its
+`erleans:grain_ref()` as name. This is ensured by this server by
+calling `erleans_grain:grain_ref()` on the process calling the
+function `register_name/0`. There is no provision in the API for a process to
+register another process.
+* A grain unregisters itself. There is no provision in the API for a process to
+unregister another process.
+
+## Events
+* A local registered grain `DOWN` signal is received.
+
+## Garbage Collection
+
+* Tombstones are not garbage collected but this is not a major problem as we
+use the `grain_ref()` as key for the MST, so the size of the MST is always
+bounded to the max number of grains that ever existed. In the near future we
+will support tombstone removal.
+
+""").
 
 -define(PERSISTENT_KEY, {?MODULE, tree}).
 -define(TREE, persistent_term:get(?PERSISTENT_KEY)).
@@ -109,15 +96,17 @@
 -export([to_list/0]).
 -export([lookup/1]).
 
-%% BONDY_MST_crdt CALLBACKS
+%% BONDY_MST_CRDT CALLBACKS
 -export([broadcast/1]).
 -export([on_merge/1]).
 -export([send/2]).
+-export([sync/1]).
 
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
 -export([broadcast_data/1]).
 -export([broadcast_channel/0]).
 -export([exchange/1]).
+-export([exchange/2]).
 -export([graft/1]).
 -export([is_stale/1]).
 -export([merge/2]).
@@ -154,27 +143,24 @@
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Starts the `erleans_pm' server.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Starts the `erleans_pm` server.
+""").
 start_link() ->
     partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], ?OPTS).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Registers the calling process with the `grain_key()' derived from its
-%% `erleans:grain_ref()'.
-%% This call is serialised via the `erleans_pm' server process.
-%%
-%% Returns an error with the following reasons:
-%% <ul>
-%% <li>`{already_in_use, partisan_remote_ref:p()}' if there is already a process
-%% registered for the same `grain_key()'.</li>
-%% <li>`badgrain' if the calling process is not an {@link erleans_grain}</li>
-%% </ul>
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Registers the calling process with the `grain_key()` derived from its
+`erleans:grain_ref()'.
+
+This call is serialised via the `erleans_pm` server process.
+
+Returns an error with the following reasons:
+* `{already_in_use, partisan_remote_ref:p()}` if there is already a process
+registered for the same `grain_key()'.</li>
+* `badgrain` if the calling process is not an `erleans_grain`
+""").
 -spec register_name() ->
     ok
     | {error, badgrain}
@@ -190,13 +176,12 @@ register_name() ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Unregisters a grain. This call fails with `badgrain' if the calling
-%% process is not the original caller to {@link register_name/0}.
-%%
-%% This call is serialised through the `erleans_pm' server process.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Unregisters a grain. This call fails with `badgrain` if the calling
+process is not the original caller to `register_name/0`.
+
+This call is serialised through the `erleans_pm` server process.
+""").
 -spec unregister_name() -> ok | {error, badgrain}.
 
 unregister_name() ->
@@ -210,21 +195,20 @@ unregister_name() ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns a process reference for `GrainRef' unless there is no reference
-%% in which case returns `undefined'. This function calls
-%% {@link erleans_pm:whereis_name/2} passing the options `[safe]'.
-%%
-%% Notice that as we use an eventually consistent model and temporarily support
-%% duplicated activations for a grain reference in different locations we could
-%% have multiple instances in the global registry. This function chooses the
-%% first reference in the list that represents a live process. Checking for
-%% liveness incurs in a remote call for remote processes and thus can be
-%% expensive in the presence of multiple instantiations. If you prefer to avoid
-%% this check you can call {@link erleans_pm:whereis_name/2} passing [unsafe] as
-%% the second argument.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns a process reference for `GrainRef` unless there is no reference
+in which case returns `undefined'. This function calls
+`erleans_pm:whereis_name/2` passing the options `[safe]'.
+
+Notice that as we use an eventually consistent model and temporarily support
+duplicated activations for a grain reference in different locations we could
+have multiple instances in the global registry. This function chooses the
+first reference in the list that represents a live process. Checking for
+liveness incurs in a remote call for remote processes and thus can be
+expensive in the presence of multiple instantiations. If you prefer to avoid
+this check you can call `erleans_pm:whereis_name/2` passing [unsafe] as
+the second argument.
+""").
 -spec whereis_name(GrainRef :: erleans:grain_ref()) ->
     partisan_remote_ref:p() | undefined.
 
@@ -232,17 +216,16 @@ whereis_name(GrainRef) ->
     whereis_name(GrainRef, [safe]).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns a process reference for `GrainRef' unless there is no reference
-%% in which case returns `undefined'.
-%% If the option `[safe]` is used it will return the process reference only if
-%% its process is alive. Checking for liveness on remote processes incurs a
-%% remote call. If there is no connection to the node in which the
-%% process lives, it is deemed dead.
-%%
-%% If Opts is `[]` or `[unsafe]` the function will not check for liveness.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns a process reference for `GrainRef` unless there is no reference
+in which case returns `undefined'.
+If the option `[safe]` is used it will return the process reference only if
+its process is alive. Checking for liveness on remote processes incurs a
+remote call. If there is no connection to the node in which the
+process lives, it is deemed dead.
+
+If Opts is `[]` or `[unsafe]` the function will not check for liveness.
+""").
 -spec whereis_name(GrainRef :: erleans:grain_ref(), Opts :: [safe | unsafe]) ->
     partisan_remote_ref:p() | undefined.
 
@@ -274,11 +257,10 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Lookups all the registered grains under name `GrainRef' using the
-%% local ets-based materialised view.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Lookups all the registered grains under name `GrainRef` using the
+local ets-based materialised view.
+""").
 -spec lookup(GrainRef :: erleans:grain_ref() | grain_key()) ->
     [partisan_remote_ref:p()].
 
@@ -295,15 +277,14 @@ lookup({_, _} = GrainKey) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the `erleans:grain_ref' for a Pid. This is more efficient than
-%% {@link erleans_grain:grain_ref} as it is not calling the grain (which might
-%% be busy handling signals) for local grains but using this module's ets table.
-%%
-%% In case of a remote reference, this incurs in an RPC to the peer node's where
-%% the grain is activated.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the `erleans:grain_ref` for a Pid. This is more efficient than
+`erleans_grain:grain_ref` as it is not calling the grain (which might
+be busy handling signals) for local grains but using this module's ets table.
+
+In case of a remote reference, this incurs in an RPC to the peer node's where
+the grain is activated.
+""").
 -spec grain_ref(partisan:any_pid()) ->
     {ok, erleans:grain_ref()} | {error, timeout | any()}.
 
@@ -339,19 +320,15 @@ grain_ref(ProcRef) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc The same as calling `to_list([safe])'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+The same as calling `to_list([safe])'.
+""").
 -spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
 
 to_list() ->
     to_list([safe]).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc
-%% @end
 %% -----------------------------------------------------------------------------
 -spec to_list([safe | unsafe]) -> [{grain_key(), partisan_remote_ref:p()}].
 
@@ -376,6 +353,26 @@ to_list([Flag]) ->
         []
     ),
     lists:reverse(L).
+
+
+
+?DOC("""
+Triggers a synchronisation exchange with a peer.
+Calls `exchange/2` with an empty map as the second argument.
+""").
+-spec sync(node()) -> {ok, pid()} | {error, term()}.
+
+sync(Peer) ->
+    sync(Peer, #{}).
+
+
+?DOC("""
+Triggers a synchronisation exchange with a peer.
+""").
+-spec sync(node(), map()) -> ok | {error, term()}.
+
+sync(Peer, Opts) ->
+    partisan_gen_server:call(?MODULE, {crdt_sync, Peer, Opts}).
 
 
 
@@ -404,26 +401,24 @@ on_merge(Peer) ->
 
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the channel to be used when broadcasting.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the channel to be used when broadcasting.
+""").
 -spec broadcast_channel() -> partisan:channel().
 
 broadcast_channel() ->
     application:get_env(erleans, partisan_channel, undefined).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Deconstructs a broadcast that is sent using
-%% `broadcast/2' as the handling module returning the message id
-%% and payload.
-%%
-%% > This function is part of the implementation of the
-%% partisan_plumtree_broadcast_handler behaviour.
-%% > You should never call it directly.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Deconstructs a broadcast that is sent using
+`broadcast/2` as the handling module returning the message id
+and payload.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
 -spec broadcast_data(Gossip :: bondy_mst_crdt:gossip()) ->
     {
         MessageId :: {bondy_mst_crdt:node_id(), bondy_mst:hash()},
@@ -435,18 +430,17 @@ broadcast_data(Gossip) ->
     {{Peer, Root}, Gossip}.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Merges a remote copy of an object record sent via broadcast w/ the
-%% local view for the key contained in the message id. If the remote copy is
-%% causally older than the current data stored then `false' is returned and no
-%% updates are merged. Otherwise, the remote copy is merged (possibly
-%% generating siblings) and `true' is returned.
-%%
-%% > This function is part of the implementation of the
-%% partisan_plumtree_broadcast_handler behaviour.
-%% > You should never call it directly.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Merges a remote copy of an object record sent via broadcast w/ the
+local view for the key contained in the message id. If the remote copy is
+causally older than the current data stored then `false` is returned and no
+updates are merged. Otherwise, the remote copy is merged (possibly
+generating siblings) and `true` is returned.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
 -spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_crdt:gossip()) ->
     boolean().
 
@@ -454,14 +448,13 @@ merge(_Id, Gossip) ->
     partisan_gen_server:call(?MODULE, {crdt_merge, Gossip}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Same as merge/2 but merges the object on `Node'
-%%
-%% > This function is part of the implementation of the
-%% partisan_plumtree_broadcast_handler behaviour.
-%% > You should never call it directly.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Same as merge/2 but merges the object on `Node'
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
 -spec merge(
     Peer :: node(),
     Root :: bondy_mst:hash(),
@@ -499,20 +492,19 @@ is_stale({Peer, Root}) ->
     true.
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Returns the object associated with the given prefixed key `Pkey' and
-%% context `Context' (message id) if the currently stored version has an equal
-%% context. Otherwise returns the atom `stale'.
-%%
-%% Because it assumes that a grafted context can only be causally older than
-%% the local view, a `stale' response means there is another message that
-%% subsumes the grafted one.
-%%
-%% > This function is part of the implementation of the
-%% partisan_plumtree_broadcast_handler behaviour.
-%% > You should never call it directly.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Returns the object associated with the given prefixed key `Pkey` and
+context `Context` (message id) if the currently stored version has an equal
+context. Otherwise returns the atom `stale'.
+
+Because it assumes that a grafted context can only be causally older than
+the local view, a `stale` response means there is another message that
+subsumes the grafted one.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
 -spec graft(gossip_id()) ->
     stale | {ok, state_awset:state_awset()} | {error, term()}.
 
@@ -520,27 +512,22 @@ graft({Peer, Root}) ->
     partisan_gen_server:call(?MODULE, {crdt_graft, Peer, Root}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Triggers an exchange.
-%% Calls {@link exchange/2} with an empty map as the second argument.
-%% > The exchange is only triggered if the application option `aae_enabled' is
-%% set to `true'.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `sync/1`.
+""").
 -spec exchange(node()) -> {ok, pid()} | {error, term()}.
 
 exchange(Peer) ->
     exchange(Peer, #{}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Triggers an exchange.
-%% @end
-%% -----------------------------------------------------------------------------
+?DOC("""
+Calls `sync/2`.
+""").
 -spec exchange(node(), map()) -> ok | {error, term()}.
 
 exchange(Peer, Opts) ->
-    partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
+    sync(Peer, Opts).
 
 
 
@@ -714,15 +701,15 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     %% Required by Plumtree.
     %% Merges a remote copy of an object record sent via broadcast w/ the
     %% local view for the key contained in the message id. If the remote copy is
-    %% causally older than the current data stored then `false' is returned and
+    %% causally older than the current data stored then `false` is returned and
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
-    %% generating siblings) and `true' is returned.
+    %% generating siblings) and `true` is returned.
     %% Since we will performing a merge if required during
     %% bondy_mst_crdt:handle/2 we reply `true'.
     Reply = true,
     {reply, Reply, State#state{crdt = CRDT}};
 
-handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
+handle_call({crdt_sync, Peer, _Opts}, _From, State) ->
     Reply = bondy_mst_crdt:trigger(State#state.crdt, Peer),
     {reply, Reply, State};
 
@@ -1048,13 +1035,9 @@ sort_conflicting_values(AWSet) ->
     ).
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc Register the calling process with GrainRef unless another local
+%% Register the calling process with GrainRef unless another local
 %% registration exists.
-%% The call
-%% @end
-%% -----------------------------------------------------------------------------
 -spec do_register_name(t(), GrainRef :: erleans:grain_ref(), Pid :: pid()) ->
     {ok, t()} | {{error, {already_in_use, partisan_remote_ref:p()}}, t()}.
 
@@ -1062,13 +1045,9 @@ do_register_name(State, GrainRef, Pid) ->
     do_register_name(State, GrainRef, Pid, strict).
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc Register the calling process with GrainRef unless another local
+%% Register the calling process with GrainRef unless another local
 %% registration exists.
-%% The call
-%% @end
-%% -----------------------------------------------------------------------------
 -spec do_register_name(
     t(), GrainRef :: erleans:grain_ref(), Pid :: pid(), strict | relaxed) ->
     {ok, t()} | {{error, {already_in_use, partisan_remote_ref:p()}}, t()}.
@@ -1093,11 +1072,7 @@ do_register_name_test(State0, GrainRef, ProcRef) ->
     {ok, State}.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 -spec do_unregister_process(t(), Pid :: pid()) -> {ok, t()}.
 
 do_unregister_process(State0, Pid) when is_pid(Pid) ->
@@ -1110,11 +1085,7 @@ do_unregister_process(State0, Pid) when is_pid(Pid) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 -spec do_unregister_name(t(), GrainKey :: grain_key(), Pid :: pid()) ->
     {ok, t()}.
 
@@ -1133,20 +1104,12 @@ do_unregister_name_test(State0, GrainKey, ProcRef) ->
     {ok, State}.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 grain_key(#{id := Id, implementing_module := Mod}) ->
     {Id, Mod}.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 monitor(GrainRef, Pid, strict) when is_pid(Pid) ->
     Mref = erlang:monitor(process, Pid),
 
@@ -1166,11 +1129,7 @@ monitor(GrainRef, Pid, relaxed) when is_pid(Pid) ->
     ok.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 demonitor(Pid) ->
     case ets:take(?MONITOR_TAB, Pid) of
         [{Pid, _, Mref}] ->
@@ -1182,11 +1141,7 @@ demonitor(Pid) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 -spec deactivate_grain(grain_key(), partisan_remote_ref:t()) -> ok.
 
 deactivate_grain(GrainKey, ProcRef) ->
@@ -1225,11 +1180,7 @@ deactivate_grain(GrainKey, ProcRef) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 whereis_stateless(GrainRef) ->
     case gproc_pool:pick_worker(GrainRef) of
         false ->
@@ -1239,11 +1190,7 @@ whereis_stateless(GrainRef) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 pick([], _, _) ->
     undefined;
 
@@ -1278,22 +1225,14 @@ pick_alive([], _) ->
     undefined.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 -spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
 
 is_proc_alive(ProcRef) ->
     is_proc_alive(ProcRef, undefined).
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 -spec is_proc_alive(partisan_remote_ref:p(), erleans:grain_ref() | undefined) ->
     boolean() | no_return().
 
@@ -1312,14 +1251,11 @@ is_proc_alive(ProcRef, GrainRef) ->
     end.
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc Returns a new list where all the process references are know to be
+%% Returns a new list where all the process references are know to be
 %% reachable. A process is reachable if the process is local (and alive
 %% according to the existance of a monitor) or is remote and
-%% {@link partisan:is_process_alive/1} returns `true' for that process.
-%% @end
-%% -----------------------------------------------------------------------------
+%% `partisan:is_process_alive/1` returns `true` for that process.
 exclude_unreachable(undefined) ->
     [];
 
@@ -1327,11 +1263,7 @@ exclude_unreachable(ProcRefs) when is_list(ProcRefs) ->
     lists:filter(fun is_reachable/1, ProcRefs).
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc
-%% @end
-%% -----------------------------------------------------------------------------
 is_reachable(ProcRef) ->
     try
         is_proc_alive(ProcRef)
@@ -1342,11 +1274,8 @@ is_reachable(ProcRef) ->
 
 
 
-%% -----------------------------------------------------------------------------
 %% @private
-%% @doc Unregisters all local alive processes.
-%% @end
-%% -----------------------------------------------------------------------------
+%% Unregisters all local alive processes.
 -spec unregister_all_local(t()) -> ok.
 
 unregister_all_local(State) ->
@@ -1393,11 +1322,9 @@ unregister_local(_, '$end_of_table') ->
 -ifdef(TEST).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Registers the calling process with the `id' attribute of `GrainRef'.
-%% This call is serialised the `erleans_pm' server process.
-%% @end
-%% -----------------------------------------------------------------------------
+
+%% Registers the calling process with the `id` attribute of `GrainRef'.
+%% This call is serialised the `erleans_pm` server process.
 -spec register_name_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok
     | {error, {already_in_use, partisan_remote_ref:p()}}.
@@ -1406,11 +1333,9 @@ register_name_(GrainRef, ProcRef) ->
     partisan_gen_server:call(?MODULE, {register_name_test, GrainRef, ProcRef}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc It can only be called by the caller
-%% This call is serialised the `erleans_pm' server process.
-%% @end
-%% -----------------------------------------------------------------------------
+
+%% It can only be called by the caller
+%% This call is serialised the `erleans_pm` server process.
 -spec unregister_name_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok | {error, badgrain | not_owner}.
 
@@ -1420,11 +1345,8 @@ unregister_name_(#{id := _} = GrainRef, ProcRef) ->
     ).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc Registers the calling process with the `id' attribute of `GrainRef'.
-%% This call is serialised the `erleans_pm' server process.
-%% @end
-%% -----------------------------------------------------------------------------
+%% Registers the calling process with the `id` attribute of `GrainRef'.
+%% This call is serialised the `erleans_pm` server process.
 -spec add_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok
     | {error, {already_in_use, partisan_remote_ref:p()}}.
@@ -1433,11 +1355,8 @@ add_(GrainRef, ProcRef) ->
     partisan_gen_server:call(?MODULE, {add_test, GrainRef, ProcRef}).
 
 
-%% -----------------------------------------------------------------------------
-%% @doc It can only be called by the caller
-%% This call is serialised the `erleans_pm' server process.
-%% @end
-%% -----------------------------------------------------------------------------
+%% It can only be called by the caller
+%% This call is serialised the `erleans_pm` server process.
 -spec remove_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok | {error, badgrain | not_owner}.
 
