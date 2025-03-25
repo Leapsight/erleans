@@ -17,7 +17,7 @@
 
 %% -----------------------------------------------------------------------------
 %% @doc This module implements the `erleans_pm' server process, the Erleans
-%% grain process registry.
+%% grain process registry as a State-based CRDT.
 %%
 %% The server state consists of the following elements:
 %% <ul>
@@ -68,7 +68,7 @@
 
 -feature(maybe_expr, enable).
 
--behaviour(bondy_mst_grove).
+-behaviour(bondy_mst_crdt).
 -behaviour(partisan_gen_server).
 -behaviour(partisan_plumtree_broadcast_handler).
 
@@ -88,7 +88,7 @@
 ]).
 
 -record(state, {
-    grove                   ::  bondy_mst_grove:t(),
+    crdt                    ::  bondy_mst_crdt:t(),
     partisan_channel        ::  partisan:channel(),
     initial_sync = false    ::  boolean()
 }).
@@ -96,7 +96,7 @@
 -type t()                   ::  #state{}.
 -type grain_key()           ::  {GrainId :: any(), ImplMod :: module()}.
 -type gossip_id()           ::  {
-                                    Peer :: bondy_mst_grove:node_id(),
+                                    Peer :: bondy_mst_crdt:node_id(),
                                     Root :: bondy_mst:hash()
                                 }.
 %% API
@@ -109,7 +109,7 @@
 -export([to_list/0]).
 -export([lookup/1]).
 
-%% BONDY_MST_GROVE CALLBACKS
+%% BONDY_MST_crdt CALLBACKS
 -export([broadcast/1]).
 -export([on_merge/1]).
 -export([send/2]).
@@ -380,13 +380,13 @@ to_list([Flag]) ->
 
 
 %% =============================================================================
-%% BONDY_MST_GROVE CALLBACKS
+%% BONDY_MST_CRDT CALLBACKS
 %% =============================================================================
 
 
 
 send(Peer, Message) ->
-    partisan_gen_server:cast({?MODULE, Peer}, {grove_message, Message}).
+    partisan_gen_server:cast({?MODULE, Peer}, {crdt_message, Message}).
 
 
 broadcast(Gossip) ->
@@ -394,7 +394,7 @@ broadcast(Gossip) ->
 
 
 on_merge(Peer) ->
-    partisan_gen_server:cast(?MODULE, {grove_on_merge, Peer}).
+    partisan_gen_server:cast(?MODULE, {crdt_on_merge, Peer}).
 
 
 
@@ -424,14 +424,14 @@ broadcast_channel() ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec broadcast_data(Gossip :: bondy_mst_grove:gossip()) ->
+-spec broadcast_data(Gossip :: bondy_mst_crdt:gossip()) ->
     {
-        MessageId :: {bondy_mst_grove:node_id(), bondy_mst:hash()},
-        Payload :: bondy_mst_grove:gossip()
+        MessageId :: {bondy_mst_crdt:node_id(), bondy_mst:hash()},
+        Payload :: bondy_mst_crdt:gossip()
     }.
 
 broadcast_data(Gossip) ->
-    #{from := Peer, root := Root} = bondy_mst_grove:gossip_data(Gossip),
+    #{from := Peer, root := Root} = bondy_mst_crdt:gossip_data(Gossip),
     {{Peer, Root}, Gossip}.
 
 
@@ -447,11 +447,11 @@ broadcast_data(Gossip) ->
 %% > You should never call it directly.
 %% @end
 %% -----------------------------------------------------------------------------
--spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_grove:gossip()) ->
+-spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_crdt:gossip()) ->
     boolean().
 
 merge(_Id, Gossip) ->
-    partisan_gen_server:call(?MODULE, {grove_merge, Gossip}).
+    partisan_gen_server:call(?MODULE, {crdt_merge, Gossip}).
 
 
 %% -----------------------------------------------------------------------------
@@ -465,10 +465,10 @@ merge(_Id, Gossip) ->
 -spec merge(
     Peer :: node(),
     Root :: bondy_mst:hash(),
-    Payload :: bondy_mst_grove:gossip()) -> boolean().
+    Payload :: bondy_mst_crdt:gossip()) -> boolean().
 
 merge(Peer, _Root, Gossip) ->
-    partisan_gen_server:call({?MODULE, Peer}, {grove_merge, Gossip}).
+    partisan_gen_server:call({?MODULE, Peer}, {crdt_merge, Gossip}).
 
 
 ?DOC("""
@@ -495,7 +495,7 @@ partisan_plumtree_broadcast_handler behaviour.
 -spec is_stale(gossip_id()) -> boolean().
 
 is_stale({Peer, Root}) ->
-    ok = partisan_gen_server:cast(?MODULE, {grove_maybe_merge, Peer, Root}),
+    ok = partisan_gen_server:cast(?MODULE, {crdt_maybe_merge, Peer, Root}),
     true.
 
 
@@ -517,7 +517,7 @@ is_stale({Peer, Root}) ->
     stale | {ok, state_awset:state_awset()} | {error, term()}.
 
 graft({Peer, Root}) ->
-    partisan_gen_server:call(?MODULE, {grove_graft, Peer, Root}).
+    partisan_gen_server:call(?MODULE, {crdt_graft, Peer, Root}).
 
 
 %% -----------------------------------------------------------------------------
@@ -540,7 +540,7 @@ exchange(Peer) ->
 -spec exchange(node(), map()) -> ok | {error, term()}.
 
 exchange(Peer, Opts) ->
-    partisan_gen_server:call(?MODULE, {grove_trigger, Peer, Opts}).
+    partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
 
 
 
@@ -585,7 +585,7 @@ init(_) ->
         merger => fun mst_merge_value/3,
         store => bondy_mst_ets_store,
         store_opts => #{name => <<"erleans_pm">>},
-        %% Grove opts
+        %% CRDT opts
         callback_mod => ?MODULE,
         max_merges => 3,
         max_same_merge => 1
@@ -593,15 +593,15 @@ init(_) ->
 
     %% We create an ets-based MST bound to this process.
     %% The ets table will be garbage collected if this process terminates.
-    Grove = bondy_mst_grove:new(Node, Opts),
-    Tree = bondy_mst_grove:tree(Grove),
+    CRDT = bondy_mst_crdt:new(Node, Opts),
+    Tree = bondy_mst_crdt:tree(CRDT),
 
     %% ets-based trees support read_concurrency so we can share the it using
     %% persistent_term
     ok = persistent_term:put(?PERSISTENT_KEY, Tree),
 
     State = #state{
-        grove = Grove,
+        crdt = CRDT,
         partisan_channel = Channel
     },
 
@@ -708,8 +708,8 @@ handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
     State = remove(State0, Key, ProcRef, partisan_remote_ref:node(ProcRef)),
     {reply, ok, State};
 
-handle_call({grove_merge, Gossip}, _From, State) ->
-    Grove = bondy_mst_grove:handle(State#state.grove, Gossip),
+handle_call({crdt_merge, Gossip}, _From, State) ->
+    CRDT = bondy_mst_crdt:handle(State#state.crdt, Gossip),
 
     %% Required by Plumtree.
     %% Merges a remote copy of an object record sent via broadcast w/ the
@@ -718,22 +718,22 @@ handle_call({grove_merge, Gossip}, _From, State) ->
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
     %% generating siblings) and `true' is returned.
     %% Since we will performing a merge if required during
-    %% bondy_mst_grove:handle/2 we reply `true'.
+    %% bondy_mst_crdt:handle/2 we reply `true'.
     Reply = true,
-    {reply, Reply, State#state{grove = Grove}};
+    {reply, Reply, State#state{crdt = CRDT}};
 
-handle_call({grove_trigger, Peer, _Opts}, _From, State) ->
-    Reply = bondy_mst_grove:trigger(State#state.grove, Peer),
+handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
+    Reply = bondy_mst_crdt:trigger(State#state.crdt, Peer),
     {reply, Reply, State};
 
-handle_call({grove_graft, Peer, Root}, _From, State) ->
+handle_call({crdt_graft, Peer, Root}, _From, State) ->
     Reply =
-        case bondy_mst_grove:is_stale(State#state.grove, Root) of
+        case bondy_mst_crdt:is_stale(State#state.crdt, Root) of
             true ->
                 stale;
 
             false ->
-                bondy_mst_grove:gossip_message(Peer, Root)
+                bondy_mst_crdt:gossip_message(Peer, Root)
         end,
     {reply, Reply, State};
 
@@ -744,24 +744,24 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(Request :: term(), State :: t()) ->
     {noreply, NewState :: t()}.
 
-handle_cast({grove_maybe_merge, Peer, Root}, State) ->
-    bondy_mst_grove:is_stale(State#state.grove, Root) andalso
-        bondy_mst_grove:trigger(State#state.grove, Peer),
+handle_cast({crdt_maybe_merge, Peer, Root}, State) ->
+    bondy_mst_crdt:is_stale(State#state.crdt, Root) andalso
+        bondy_mst_crdt:trigger(State#state.crdt, Peer),
     {noreply, State};
 
-handle_cast({grove_on_merge, _Peer}, #state{initial_sync = false} = State0) ->
+handle_cast({crdt_on_merge, _Peer}, #state{initial_sync = false} = State0) ->
     State = remove_stale(State0#state{initial_sync = true}),
     ok = maybe_deactivate_local_duplicates(State),
     {noreply, State};
 
-handle_cast({grove_on_merge, _Peer}, #state{initial_sync = true} = State) ->
+handle_cast({crdt_on_merge, _Peer}, #state{initial_sync = true} = State) ->
     ok = maybe_deactivate_local_duplicates(State),
     {noreply, State};
 
-handle_cast({grove_message, Msg}, State) ->
-    %% Fwd message to bondy_mst_grove
-    Grove = bondy_mst_grove:handle(State#state.grove, Msg),
-    {noreply, State#state{grove = Grove}};
+handle_cast({crdt_message, Msg}, State) ->
+    %% Fwd message to bondy_mst_crdt
+    CRDT = bondy_mst_crdt:handle(State#state.crdt, Msg),
+    {noreply, State#state{crdt = CRDT}};
 
 handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
     %% Internal case to deal with inconsistencies
@@ -824,8 +824,8 @@ add(#state{} = State, GrainKey, Value) ->
 
 
 %% @private
-add(#state{grove = Grove0} = State, Key, Value, Node) ->
-    Tree = bondy_mst_grove:tree(Grove0),
+add(#state{crdt = CRDT0} = State, Key, Value, Node) ->
+    Tree = bondy_mst_crdt:tree(CRDT0),
 
     AWSet1 =
         case bondy_mst:get(Tree, Key) of
@@ -837,8 +837,8 @@ add(#state{grove = Grove0} = State, Key, Value, Node) ->
         end,
 
     {ok, AWSet} = state_type:mutate({add, Value}, Node, AWSet1),
-    Grove = bondy_mst_grove:put(Grove0, Key, AWSet),
-    State#state{grove = Grove}.
+    CRDT = bondy_mst_crdt:put(CRDT0, Key, AWSet),
+    State#state{crdt = CRDT}.
 
 
 %% @private
@@ -852,14 +852,14 @@ remove(State, Key, Value, Node) ->
 
 
 %% @private
-remove(#state{grove = Grove0} = State, Key, Value, Node, Opts) ->
-    Grove = grove_remove(Grove0, Key, Value, Node, Opts),
-    State#state{grove = Grove}.
+remove(#state{crdt = CRDT0} = State, Key, Value, Node, Opts) ->
+    CRDT = crdt_remove(CRDT0, Key, Value, Node, Opts),
+    State#state{crdt = CRDT}.
 
 
 %% @private
-grove_remove(Grove, Key, Value, Node, Opts) ->
-    Tree = bondy_mst_grove:tree(Grove),
+crdt_remove(CRDT, Key, Value, Node, Opts) ->
+    Tree = bondy_mst_crdt:tree(CRDT),
     AWSet1 =
         case bondy_mst:get(Tree, Key) of
             undefined ->
@@ -869,7 +869,7 @@ grove_remove(Grove, Key, Value, Node, Opts) ->
                 AWSet0
         end,
     {ok, AWSet} = state_type:mutate({rmv, Value}, Node, AWSet1),
-    bondy_mst_grove:put(Grove, Key, AWSet, Opts).
+    bondy_mst_crdt:put(CRDT, Key, AWSet, Opts).
 
 
 %% @private
@@ -967,8 +967,8 @@ maybe_deactivate_local_duplicate(GrainKey, AWSet) ->
 
 
 %% @private
-maybe_deactivate_local_duplicates(#state{grove = Grove}) ->
-    Tree = bondy_mst_grove:tree(Grove),
+maybe_deactivate_local_duplicates(#state{crdt = CRDT}) ->
+    Tree = bondy_mst_crdt:tree(CRDT),
     Fun = fun({Key, AWSet}) -> maybe_deactivate_local_duplicate(Key, AWSet) end,
     bondy_mst:foreach(Tree, Fun).
 
@@ -993,8 +993,8 @@ safe_is_location_right({_, Mod}, LocalPRef) ->
     end.
 
 
-remove_stale(#state{grove = Grove} = State) ->
-    Tree = bondy_mst_grove:tree(Grove),
+remove_stale(#state{crdt = CRDT} = State) ->
+    Tree = bondy_mst_crdt:tree(CRDT),
     Fun = fun({Key, AWSet}, Acc) -> remove_stale(Acc, Key, AWSet) end,
     bondy_mst:fold(Tree, Fun, State).
 
