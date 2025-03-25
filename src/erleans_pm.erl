@@ -580,10 +580,12 @@ init(_) ->
     %% We wrap the tree using the exchange module
     Node = partisan:node(),
     Opts = #{
-        store => bondy_mst_store:open(
-            bondy_mst_ets_store, sha256, [{name, <<"erleans_pm">>}]
-        ),
+        %% MST opts
+        hash_algorithm => sha256,
         merger => fun mst_merge_value/3,
+        store => bondy_mst_ets_store,
+        store_opts => #{name => <<"erleans_pm">>},
+        %% Grove opts
         callback_mod => ?MODULE,
         max_merges => 3,
         max_same_merge => 1
