@@ -152,13 +152,13 @@ start_link() ->
 
 ?DOC("""
 Registers the calling process with the `grain_key()` derived from its
-`erleans:grain_ref()'.
+`erleans:grain_ref()`.
 
 This call is serialised via the `erleans_pm` server process.
 
 Returns an error with the following reasons:
 * `{already_in_use, partisan_remote_ref:p()}` if there is already a process
-registered for the same `grain_key()'.</li>
+registered for the same `grain_key()`.</li>
 * `badgrain` if the calling process is not an `erleans_grain`
 """).
 -spec register_name() ->
@@ -197,8 +197,8 @@ unregister_name() ->
 
 ?DOC("""
 Returns a process reference for `GrainRef` unless there is no reference
-in which case returns `undefined'. This function calls
-`erleans_pm:whereis_name/2` passing the options `[safe]'.
+in which case returns `undefined`. This function calls
+`erleans_pm:whereis_name/2` passing the options `[safe]`.
 
 Notice that as we use an eventually consistent model and temporarily support
 duplicated activations for a grain reference in different locations we could
@@ -218,7 +218,7 @@ whereis_name(GrainRef) ->
 
 ?DOC("""
 Returns a process reference for `GrainRef` unless there is no reference
-in which case returns `undefined'.
+in which case returns `undefined`.
 If the option `[safe]` is used it will return the process reference only if
 its process is alive. Checking for liveness on remote processes incurs a
 remote call. If there is no connection to the node in which the
@@ -321,7 +321,7 @@ grain_ref(ProcRef) ->
 
 
 ?DOC("""
-The same as calling `to_list([safe])'.
+The same as calling `to_list([safe])`.
 """).
 -spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
 
@@ -495,7 +495,7 @@ is_stale({Peer, Root}) ->
 ?DOC("""
 Returns the object associated with the given prefixed key `Pkey` and
 context `Context` (message id) if the currently stored version has an equal
-context. Otherwise returns the atom `stale'.
+context. Otherwise returns the atom `stale`.
 
 Because it assumes that a grafted context can only be causally older than
 the local view, a `stale` response means there is another message that
@@ -705,7 +705,7 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
     %% generating siblings) and `true` is returned.
     %% Since we will performing a merge if required during
-    %% bondy_mst_crdt:handle/2 we reply `true'.
+    %% bondy_mst_crdt:handle/2 we reply `true`.
     Reply = true,
     {reply, Reply, State#state{crdt = CRDT}};
 
@@ -1323,7 +1323,7 @@ unregister_local(_, '$end_of_table') ->
 
 
 
-%% Registers the calling process with the `id` attribute of `GrainRef'.
+%% Registers the calling process with the `id` attribute of `GrainRef`.
 %% This call is serialised the `erleans_pm` server process.
 -spec register_name_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok
@@ -1345,7 +1345,7 @@ unregister_name_(#{id := _} = GrainRef, ProcRef) ->
     ).
 
 
-%% Registers the calling process with the `id` attribute of `GrainRef'.
+%% Registers the calling process with the `id` attribute of `GrainRef`.
 %% This call is serialised the `erleans_pm` server process.
 -spec add_(erleans:grain_ref(), partisan_remote_ref:p()) ->
     ok
