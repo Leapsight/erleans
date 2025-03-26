@@ -714,9 +714,9 @@ handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
     {reply, ok, State};
 
 handle_call({crdt_merge, Gossip}, _From, State) ->
-    CRDT = State#state.crdt,
-    Root0 = bondy_mst_crdt:root(CRDT),
-    CRDT = bondy_mst_crdt:handle(CRDT, Gossip),
+    CRDT0 = State#state.crdt,
+    Root0 = bondy_mst_crdt:root(CRDT0),
+    CRDT = bondy_mst_crdt:handle(CRDT0, Gossip),
     Root = bondy_mst_crdt:root(CRDT),
 
     %% Required by Plumtree.
