@@ -582,11 +582,17 @@ init(_) ->
         hash_algorithm => sha256,
         merger => fun mst_merge_value/3,
         store => bondy_mst_ets_store,
-        store_opts => #{name => <<"erleans_pm">>},
+        store_opts => #{
+            name => atom_to_binary(?MODULE),
+            persistent => true
+        },
         %% CRDT opts
         callback_mod => ?MODULE,
-        max_merges => 3,
-        max_same_merge => 1
+        max_merges => 1,
+        max_merges_per_root => 1,
+        max_versions => 10,
+        version_ttl => timer:minutes(1),
+        fwd_bcast => false
     },
 
     %% We create an ets-based MST bound to this process.
@@ -594,8 +600,9 @@ init(_) ->
     CRDT = bondy_mst_crdt:new(Node, Opts),
     Tree = bondy_mst_crdt:tree(CRDT),
 
-    %% ets-based trees support read_concurrency so we can share the it using
-    %% persistent_term
+    %% ets-based trees support read_concurrency (option store_opts.persistent)
+    %% so we can cache and share it using persistent_term to avoid a call to
+    %% this process.
     ok = persistent_term:put(?PERSISTENT_KEY, Tree),
 
     State = #state{
@@ -610,8 +617,8 @@ handle_continue(monitor_existing, State0) ->
     %% This prevents any grain to be registered as we are blocking the server
     %% until we finish.
     %% We fold the claimed ?MONITOR_TAB table to find any existing
-    %% registrations. In case the table is new, it would be empty. Otherwise, we
-    %% would iterate over registrations that were done by a previous
+    %% registrations. In case the table is new, it would be empty. Otherwise,
+    %% we would iterate over registrations that were done by a previous
     %% instance of this server before it crashed.
     %% We re-register/monitor alive pids and remove dead ones.
     Fun = fun
