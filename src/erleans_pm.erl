@@ -539,7 +539,8 @@ graft({Peer, Root}) ->
     %% In our case, the message_id is just the peer's root hash, so in case
     %% we contain the root we return a Gossip message with our root. Otherwise
     %% we return 'stale'.
-    partisan_gen_server:call(?MODULE, {crdt_graft, Peer, Root}).
+    %% partisan_gen_server:call(?MODULE, {crdt_graft, Peer, Root}).
+    {error, disabled}.
 
 
 ?DOC("""
