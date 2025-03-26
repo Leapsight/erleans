@@ -95,6 +95,7 @@ will support tombstone removal.
 -export([grain_ref/1]).
 -export([to_list/0]).
 -export([lookup/1]).
+-export([info/0]).
 
 %% BONDY_MST_CRDT CALLBACKS
 -export([broadcast/1]).
@@ -382,6 +383,10 @@ sync(Peer, Opts) ->
     partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
 
 
+info() ->
+    partisan_gen_server:call(?MODULE, info).
+
+
 
 %% =============================================================================
 %% BONDY_MST_CRDT CALLBACKS
@@ -533,9 +538,9 @@ partisan_plumtree_broadcast_handler behaviour.
 > You should never call it directly.
 """).
 -spec graft(gossip_id()) ->
-    stale | {ok, state_awset:state_awset()} | {error, term()}.
+    stale | {ok, bondy_mst_crdt:gossip()} | {error, term()}.
 
-graft({Peer, Root}) ->
+graft({_Peer, _Root}) ->
     %% In our case, the message_id is just the peer's root hash, so in case
     %% we contain the root we return a Gossip message with our root. Otherwise
     %% we return 'stale'.
@@ -698,7 +703,7 @@ when is_pid(Caller) ->
     {reply, Reply, State};
 
 handle_call({register_name, _}, _From, State) ->
-    %% A call from a remote node, now allowed
+    %% A call from a remote node, not allowed
     {reply, {error, not_local}, State};
 
 handle_call({unregister_name, GrainRef}, {Caller, _}, State0)
@@ -754,15 +759,16 @@ handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
     Reply = bondy_mst_crdt:trigger(State#state.crdt, Peer),
     {reply, Reply, State};
 
-handle_call({crdt_graft, Peer, Root}, _From, State) ->
-    Reply =
-        case bondy_mst_crdt:is_stale(State#state.crdt, Root) of
-            true ->
-                stale;
-
-            false ->
-                bondy_mst_crdt:gossip_message(Peer, Root)
-        end,
+handle_call(info, _From, State) ->
+    Reply = #{
+        tree => #{
+            root => bondy_mst_crdt:root(State#state.crdt)
+        },
+        local_registry => #{
+            memory => ets:info(?MONITOR_TAB, memory),
+            size => ets:info(?MONITOR_TAB, size)
+        }
+    },
     {reply, Reply, State};
 
 handle_call(_Request, _From, State) ->
@@ -773,8 +779,8 @@ handle_call(_Request, _From, State) ->
     {noreply, NewState :: t()}.
 
 handle_cast({crdt_maybe_merge, Peer, Root}, State) ->
-    bondy_mst_crdt:is_stale(State#state.crdt, Root) andalso
-        bondy_mst_crdt:trigger(State#state.crdt, Peer),
+    Root == bondy_mst_crdt:root(State#state.crdt)
+        andalso bondy_mst_crdt:trigger(State#state.crdt, Peer),
     {noreply, State};
 
 handle_cast({crdt_on_merge, _Peer}, #state{initial_sync = false} = State0) ->
