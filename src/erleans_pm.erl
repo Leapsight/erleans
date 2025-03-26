@@ -707,7 +707,10 @@ handle_call({remove_test, GrainRef, ProcRef}, _From, State0) ->
     {reply, ok, State};
 
 handle_call({crdt_merge, Gossip}, _From, State) ->
-    CRDT = bondy_mst_crdt:handle(State#state.crdt, Gossip),
+    CRDT = State#state.crdt,
+    Root0 = bondy_mst_crdt:root(CRDT),
+    CRDT = bondy_mst_crdt:handle(CRDT, Gossip),
+    Root = bondy_mst_crdt:root(CRDT),
 
     %% Required by Plumtree.
     %% Merges a remote copy of an object record sent via broadcast w/ the
@@ -716,8 +719,8 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     %% no updates are merged. Otherwise, the remote copy is merged (possibly
     %% generating siblings) and `true` is returned.
     %% Since we will performing a merge if required during
-    %% bondy_mst_crdt:handle/2 we reply `true`.
-    Reply = true,
+    %% bondy_mst_crdt:handle/2 we reply `false`.
+    Reply = Root =/= Root0,
     {reply, Reply, State#state{crdt = CRDT}};
 
 handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
