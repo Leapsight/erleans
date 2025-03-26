@@ -388,15 +388,26 @@ sync(Peer, Opts) ->
 %% =============================================================================
 
 
-
+?DOC("""
+Implementation of the `bondy_mst_crdt` callback.
+Casts message `Message` to this server on node `Peer` using `partisan`.
+""").
 send(Peer, Message) ->
     partisan_gen_server:cast({?MODULE, Peer}, {crdt_message, Message}).
 
 
+?DOC("""
+Implementation of the `bondy_mst_crdt` callback.
+Broadcasts message `Gossip` to peers using Plumtree (Epidemis broadcast trees).
+""").
 broadcast(Gossip) ->
     partisan:broadcast(Gossip, ?MODULE).
 
 
+?DOC("""
+Implementation of the `bondy_mst_crdt` callback.
+Removes stale entries and duplicates after merge.
+""").
 on_merge(Peer) ->
     partisan_gen_server:cast(?MODULE, {crdt_on_merge, Peer}).
 
@@ -409,6 +420,7 @@ on_merge(Peer) ->
 
 
 ?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
 Returns the channel to be used when broadcasting.
 """).
 -spec broadcast_channel() -> partisan:channel().
@@ -418,6 +430,7 @@ broadcast_channel() ->
 
 
 ?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
 Deconstructs a broadcast that is sent using `broadcast/2` returning the message
 id and payload.
 
@@ -437,6 +450,7 @@ broadcast_data(Gossip) ->
 
 
 ?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
 Merges a remote copy of an object record sent via broadcast w/ the
 local view for the key contained in the message id. If the remote copy is
 causally older than the current data stored then `false` is returned and no
@@ -455,6 +469,7 @@ merge(_Id, Gossip) ->
 
 
 ?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
 Same as merge/2 but merges the object on `Node'
 
 > This function is part of the implementation of the
@@ -471,6 +486,7 @@ merge(Peer, _Root, Gossip) ->
 
 
 ?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
 When a peer broadcasts a message it does it to the nodes in its eager-push set
 only, but also simultaneously sends I_HAVE notifications to nodes in its
 lazy-push set instead of the entire message. This callback is the one that
@@ -483,6 +499,8 @@ This saves bandwidth, because instead of blindly sending every neighbor the full
 payload, the node sends just the root hash. The lazy neighbors can decide
 whether they need the full message or not.
 
+If function returns `true` then Plumtree will do nothing. However,if it returns
+`false` then Plumtree will `graft` the message from the peer and send it to us.
 
 > This function is part of the implementation of the
 partisan_plumtree_broadcast_handler behaviour.
@@ -501,6 +519,7 @@ is_stale({Peer, Root}) ->
 
 
 ?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
 In Plumtree this is used to return the object associated with the given prefixed
 message id if the currently stored version has an equal context. Otherwise
 returning the atom `stale`.
