@@ -14,7 +14,7 @@
   1},
  {<<"bondy_mst">>,
   {git,"https://github.com/bondy-io/bondy_mst.git",
-       {ref,"1b65388770a1ef4112ca2551f3ee861fee811ad8"}},
+       {ref,"6321434a3a2e086ee57ab070170b2941299a0664"}},
   0},
  {<<"cf">>,{pkg,<<"cf">>,<<"0.3.1">>},1},
  {<<"eqwalizer_support">>,
