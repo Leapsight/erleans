@@ -819,8 +819,9 @@ handle_cast(_Request, State) ->
 handle_info({'ETS-TRANSFER', erleans_pm_monitor, _, []}, State) ->
     {noreply, State};
 
-handle_info({nodedown, _Node}, State) ->
-    {noreply, State};
+handle_info({nodedown, Node}, State) ->
+    CRDT = bondy_mst_crdt:cancel_merge(State#state.crdt, Node),
+    {noreply, State#state{crdt = CRDT}};
 
 handle_info({nodeup, _Node}, State) ->
     {noreply, State};
