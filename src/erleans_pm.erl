@@ -1011,7 +1011,8 @@ maybe_deactivate_local_duplicates(#state{crdt = CRDT}) ->
 %% @private
 safe_is_location_right({_, Mod}, LocalPRef) ->
     try
-        erleans_grain:is_location_right(Mod, LocalPRef)
+        Pid = partisan_remote_ref:to_pid(LocalPRef),
+        erleans_grain:is_location_right(Mod, Pid)
     catch
         Class:Reason:Stacktrace ->
             ?LOG_WARNING(#{
