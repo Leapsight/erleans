@@ -431,7 +431,7 @@ Returns the channel to be used when broadcasting.
 -spec broadcast_channel() -> partisan:channel().
 
 broadcast_channel() ->
-    application:get_env(erleans, partisan_channel, undefined).
+    application:get_env(erleans, partisan_broadcast_channel, undefined).
 
 
 ?DOC("""
