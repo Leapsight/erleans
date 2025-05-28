@@ -1305,7 +1305,7 @@ is_proc_alive(ProcRef, GrainRef) ->
 %% Returns a new list where all the process references are know to be
 %% reachable. A process is reachable if the process is local (and alive
 %% according to the existance of a monitor) or is remote and
-%% `partisan:is_process_alive/1` returns `true` for that process.
+%% the node is connected (assumes full-mesh)
 exclude_unreachable(undefined) ->
     [];
 
@@ -1316,7 +1316,7 @@ exclude_unreachable(ProcRefs) when is_list(ProcRefs) ->
 %% @private
 is_reachable(ProcRef) ->
     try
-        is_proc_alive(ProcRef)
+        partisan:is_connected(partisan:node(ProcRef))
     catch
         _:_ ->
             false
