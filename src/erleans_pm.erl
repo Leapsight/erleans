@@ -985,7 +985,7 @@ maybe_deactivate_local_duplicate(GrainKey, AWSet) ->
 
     maybe
         %% Partition based on locality
-        {[ProcRef], [_, _] = Remotes} ?=
+        {[ProcRef], [_ | _] = Remotes} ?=
             lists:partition(fun partisan_remote_ref:is_local/1, All),
         %% We have duplicates, so we need to check if our local duplicate should
         %% belong here.
