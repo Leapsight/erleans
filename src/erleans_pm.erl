@@ -617,7 +617,8 @@ init(_) ->
         max_merges_per_root => 1,
         max_versions => 10,
         version_ttl => timer:minutes(1),
-        fwd_bcast => false
+        fwd_bcast => false,
+        consistency_model => eventual
     },
 
     %% We create an ets-based MST bound to this process.
