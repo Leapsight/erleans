@@ -254,7 +254,7 @@ whereis_name(#{id := _} = GrainRef, [Flag]) ->
             undefined;
 
         ProcRefs ->
-            pick(ProcRefs, GrainRef, [Flag])
+            pick(ProcRefs, [Flag])
     end.
 
 
@@ -350,7 +350,7 @@ to_list([Flag]) ->
                     Acc;
 
                 L ->
-                    case pick(L, undefined, [Flag]) of
+                    case pick(L, [Flag]) of
                         undefined ->
                             Acc;
 
@@ -1241,64 +1241,38 @@ whereis_stateless(GrainRef) ->
 
 
 %% @private
-pick([], _, _) ->
+pick([], _) ->
     undefined;
 
-pick(L, GrainRef, []) ->
-    pick(L, GrainRef, [unsafe]);
+pick(L, []) ->
+    pick(L, [unsafe]);
 
-pick([H], _, [unsafe]) ->
+pick([H], [unsafe]) ->
     H;
 
-pick([H | _], _, [unsafe]) ->
+pick([H | _], [unsafe]) ->
     H;
 
-pick(List, GrainRef, [safe]) ->
-    pick_alive(List, GrainRef).
+pick(List, [safe]) ->
+    pick_alive(List).
 
 
 %% @private
-pick_alive([H | T], GrainRef) ->
-    try is_proc_alive(H, GrainRef) of
+pick_alive([H | T]) ->
+    try partisan:is_process_alive(H) of
         true ->
             H;
 
         false ->
-            pick_alive(T, GrainRef)
+            pick_alive(T)
 
     catch
         error:_ ->
-            pick_alive(T, GrainRef)
+            pick_alive(T)
     end;
 
-pick_alive([], _) ->
+pick_alive([]) ->
     undefined.
-
-
-%% @private
--spec is_proc_alive(partisan_remote_ref:p()) -> boolean() | no_return().
-
-is_proc_alive(ProcRef) ->
-    is_proc_alive(ProcRef, undefined).
-
-
-%% @private
--spec is_proc_alive(partisan_remote_ref:p(), erleans:grain_ref() | undefined) ->
-    boolean() | no_return().
-
-is_proc_alive(ProcRef, undefined) ->
-    partisan:is_process_alive(ProcRef);
-
-is_proc_alive(ProcRef, GrainRef) ->
-    case grain_ref(ProcRef) of
-        {ok, GrainRef} ->
-            true;
-        {ok, _} ->
-            %% TODO send a cast to delete this entry!
-            false;
-        {error, _} ->
-            false
-    end.
 
 
 %% @private

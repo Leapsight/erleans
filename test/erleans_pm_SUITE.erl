@@ -22,7 +22,6 @@ groups() ->
         {main, [], [
             register_name,
             whereis_name,
-            %% already_in_use,
             stale_local_entry,
             unreachable_remote_entry,
             reachable_stale_remote_entry
@@ -97,20 +96,6 @@ whereis_name(Config) ->
     erleans_grain:deactivate(GrainRef).
 
 
-%% already_in_use(Config) ->
-%%     GrainRef = ?config(grainref, Config),
-
-%%     %% We simulate duplicate registrations
-%%     ok = erleans_pm:register_name_(GrainRef, partisan:self()),
-
-%%     ?assertMatch(
-%%         {error, {already_in_use, _}},
-%%         erleans_pm:register_name_(GrainRef, partisan:self())
-%%     ),
-%%     ok.
-
-
-
 stale_local_entry(_Config) ->
     GrainRef = #{id => <<"test_grain">>,
         implementing_module => erleans_dummy_grain,
@@ -122,13 +107,15 @@ stale_local_entry(_Config) ->
     %% when there was a registration on a previous instantiation of this node
     %% that remained in the global store (another node's replica)
     %% and re-emerges here via active anti-entropy.
-    ok = erleans_pm:add_(GrainRef, partisan:self()),
+    %% The process should be dead before we call add_
+    Pid = spawn(fun() -> ok end),
+    ok = erleans_pm:add_(GrainRef, partisan_remote_ref:from_term(Pid)),
 
     ?assertMatch(
         undefined,
         erleans_pm:whereis_name(GrainRef),
-        "Should not return the pid it is a stale entry and thus "
-        "it is not present in the local erleans_pm ets table."
+        "Should not return the pid as it is a stale entry and thus "
+        "it is not present in the erleans_pm's local ets table."
     ),
 
     ok = erleans_pm:remove_(GrainRef, partisan:self()).
@@ -139,7 +126,8 @@ unreachable_remote_entry(Config) ->
 
     %% We simulate a previous remote registration. It could be alive or dead
     %% but as we are not connected to that node we should consider it dead.
-    [_|PidStr] = partisan:self(),
+    Pid = spawn(fun() -> ok end),
+    [_|PidStr] = partisan_remote_ref:from_term(Pid),
     UnreachableNode = 'foo@127.0.0.1',
     PidRef1 = [UnreachableNode|PidStr],
     ok = erleans_pm:register_name_(GrainRef, PidRef1),
