@@ -33,13 +33,13 @@ start_link() ->
 -spec start_child(GrainRef :: erleans:grain_ref())
                  -> {ok, pid() | undefined} | {error, partisan_gen_supervisor:startchild_err()}.
 start_child(GrainRef) ->
-    ?LOG_INFO("local_grain=~p", [GrainRef]),
+    ?LOG_DEBUG("local_grain=~p", [GrainRef]),
     partisan_gen_supervisor:start_child(?MODULE, [GrainRef]).
 
 -spec start_child(Node :: node(), GrainRef :: erleans:grain_ref())
                  -> {ok, pid() | undefined} | {error, partisan_gen_supervisor:startchild_err()}.
 start_child(Node, GrainRef) ->
-    ?LOG_INFO("node=~p grain=~p", [Node, GrainRef]),
+    ?LOG_DEBUG("node=~p grain=~p", [Node, GrainRef]),
     partisan_gen_supervisor:start_child({?MODULE, Node}, [GrainRef]).
 
 init([]) ->

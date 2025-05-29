@@ -242,7 +242,7 @@ do_for_ref(GrainRef, Fun) ->
     try
         case erleans_pm:whereis_name(GrainRef) of
             undefined ->
-                ?LOG_INFO("start=~p", [GrainRef]),
+                ?LOG_DEBUG("start=~p", [GrainRef]),
                 case activate_grain(GrainRef) of
                     {ok, undefined} ->
                         %% the only way the Pid could be `undefined`
