@@ -613,10 +613,10 @@ init(_) ->
         },
         %% CRDT opts
         callback_mod => ?MODULE,
-        max_merges => 3,
+        max_merges => 1,
         max_merges_per_root => 1,
         max_versions => 10,
-        version_ttl => timer:minutes(1),
+        version_ttl => timer:seconds(30),
         fwd_bcast => false,
         consistency_model => eventual
     },
