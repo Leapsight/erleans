@@ -12,6 +12,7 @@
     sbroker,
     erlware_commons,
     bondy_mst,
+    resulto,
     opentelemetry_api
    ]},
   {modules, []},

@@ -166,6 +166,7 @@ unreachable_remote_entry(Config) ->
     ),
 
     ok = erleans_grain:deactivate(GrainRef),
+    timer:sleep(2000),
     ok = erleans_pm:unregister_name_(GrainRef, PidRef1),
     {error, not_active} = erleans_grain:deactivate(GrainRef).
 

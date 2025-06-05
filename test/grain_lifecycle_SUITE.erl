@@ -51,6 +51,8 @@ init_per_group_(DeactivateAfter, Config) ->
     application:load(partisan),
     application:load(bondy_mst),
     application:load(erleans),
+    logger:set_application_level(partisan, error),
+    logger:set_application_level(bondy_mst, error),
     application:set_env(erleans, deactivate_after, DeactivateAfter),
     {ok, _} = application:ensure_all_started(partisan),
     {ok, _} = application:ensure_all_started(bondy_mst),
@@ -72,8 +74,10 @@ end_per_testcase(_, _Config) ->
     ok.
 
 manual_start_stop(_Config) ->
+
     Grain1 = erleans:get_grain(test_grain, <<"manual-start-stop-grain1">>),
     Grain2 = erleans:get_grain(test_grain, <<"manual-start-stop-grain2">>),
+    timer:sleep(5000),
 
     ?assertEqual({ok, 1}, test_grain:activated_counter(Grain1)),
     ?assertEqual({ok, 1}, test_grain:activated_counter(Grain2)),
