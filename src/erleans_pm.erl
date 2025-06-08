@@ -216,17 +216,17 @@ register_name(Timeout) ->
 
                         [ProcRef|_] ->
                             %% We found at least one active grain that is
-                            %% reachable, so we pick it. If there was a local
-                            %% grain registered under GrainRef, ProcRef would be
-                            %% it (because of ordering guarantee).
+                            %% reachable, so we pick it.
                             {error, {already_in_use, ProcRef}}
                     end;
 
                 Pid when Pid == self() ->
-                    %% Idempotent, although it should not happen
+                    %% Idempotent, although it should not happen that the grain
+                    %% calls us twice
                     ok;
 
                 Pid when is_pid(Pid) ->
+                    %% Anotehr local pid registered this name
                     ProcRef = partisan_remote_ref:from_term(Pid),
                     {error, {already_in_use, ProcRef}}
             end
