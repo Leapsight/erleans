@@ -66,6 +66,7 @@ will support tombstone removal.
 -define(PERSISTENT_KEY, {?MODULE, tree}).
 -define(TREE, persistent_term:get(?PERSISTENT_KEY)).
 -define(MONITOR_TAB, erleans_pm_monitor).
+-define(TIMEOUT, 15000).
 
 %% This server may receive a huge amount of messages.
 %% We make sure that they are stored off heap to avoid excessive GCs.
@@ -89,6 +90,7 @@ will support tombstone removal.
 %% API
 -export([start_link/0]).
 -export([register_name/0]).
+-export([register_name/1]).
 -export([unregister_name/0]).
 -export([whereis_name/1]).
 -export([whereis_name/2]).
@@ -155,25 +157,79 @@ start_link() ->
 Registers the calling process with the `grain_key()` derived from its
 `erleans:grain_ref()`.
 
-This call is serialised via the `erleans_pm` server process.
+The duplicate check logic is executed by the caller concurrently while the
+actual registration is serialised via the `erleans_pm` server process.
 
 Returns an error with the following reasons:
+* `badgrain` if the calling process is not an Erleans grain.
+* `timeout` if there was no response from the server within the requested time
 * `{already_in_use, partisan_remote_ref:p()}` if there is already a process
-registered for the same `grain_key()`.</li>
-* `badgrain` if the calling process is not an `erleans_grain`
+registered for the same `grain_key()`.
 """).
 -spec register_name() ->
     ok
     | {error, badgrain}
+    | {error, timeout}
+    | {error, noproc}
     | {error, {already_in_use, partisan_remote_ref:p()}}.
 
 register_name() ->
+    register_name(?TIMEOUT).
+
+
+?DOC("""
+Registers the calling process with the `grain_key()` derived from its
+`erleans:grain_ref()`.
+
+The duplicate check logic is executed by the caller concurrently while the
+actual registration is serialised via the `erleans_pm` server process.
+
+Returns an error with the following reasons:
+* `badgrain` if the calling process is not an Erleans grain.
+* `timeout` if there was no response from the server within the requested time
+* `{already_in_use, partisan_remote_ref:p()}` if there is already a process
+registered for the same `grain_key()`.
+""").
+-spec register_name(timeout()) ->
+    ok
+    | {error, badgrain}
+    | {error, timeout}
+    | {error, {already_in_use, partisan_remote_ref:p()}}.
+
+register_name(Timeout) ->
     case erleans:grain_ref() of
         undefined ->
             {error, badgrain};
 
         GrainRef ->
-            partisan_gen_server:call(?MODULE, {register_name, GrainRef})
+            case lookup_local_pid(GrainRef) of
+                undefined ->
+                    %% We get all known registrations order by location local <
+                    %% node(), and then by node().
+                    Processes = lookup(GrainRef),
+
+                    case exclude_unreachable(Processes) of
+                        [] ->
+                            safe_call(
+                                ?MODULE, {register_name, GrainRef}, Timeout
+                            );
+
+                        [ProcRef|_] ->
+                            %% We found at least one active grain that is
+                            %% reachable, so we pick it. If there was a local
+                            %% grain registered under GrainRef, ProcRef would be
+                            %% it (because of ordering guarantee).
+                            {error, {already_in_use, ProcRef}}
+                    end;
+
+                Pid when Pid == self() ->
+                    %% Idempotent, although it should not happen
+                    ok;
+
+                Pid when is_pid(Pid) ->
+                    ProcRef = partisan_remote_ref:from_term(Pid),
+                    {error, {already_in_use, ProcRef}}
+            end
     end.
 
 
@@ -303,8 +359,6 @@ grain_ref(Pid) when is_pid(Pid) ->
 
 grain_ref(ProcRef) ->
     %% We know this is not a pid so it must be a partisan process reference.
-    %% ProcRef can have 3 different serializations which are opaque, so we
-    %% check using its API.
     partisan:is_pid(ProcRef) orelse error({badarg, [ProcRef]}),
 
     case partisan_remote_ref:is_local(ProcRef) of
@@ -312,6 +366,8 @@ grain_ref(ProcRef) ->
             grain_ref(partisan_remote_ref:to_term(ProcRef));
 
         false ->
+            %% We use RPC cause grain_ref uses ets directly so we avoid blocking
+            %% our peer process
             Peer = partisan:node(ProcRef),
             case partisan_rpc:call(Peer, ?MODULE, grain_ref, [ProcRef], 5000) of
                 {badrpc, Reason} ->
@@ -674,34 +730,38 @@ handle_continue(monitor_existing, State0) ->
 handle_continue(_, State) ->
     {noreply, State}.
 
-
 handle_call({register_name, GrainRef}, {Caller, _}, State0)
 when is_pid(Caller) ->
-    %% This call can only be made locally, so if Caller is not a pid it would be
-    %% a partisan:pid() and thus we will match the fallback clause returning an
-    %% error.
-
-    %% We get all known registrations order by location local < node(), and then
-    %% by node().
-    Processes = lookup(GrainRef),
-
-    %% We then exclude unreachable grains
-    {Reply, State} =
-        case exclude_unreachable(Processes) of
-            [] ->
-                %% Nothing registered or all unreachable, so we allow the local
-                %% registration
-                do_register_name(State0, GrainRef, Caller);
-
-            [ProcRef|_] ->
-                %% We found at least one active grain that is reachable, so we
-                %% pick it. If there was a local grain registered under GrainRef,
-                %% ProcRef would be it (because of ordering guarantee).
-                Error = {error, {already_in_use, ProcRef}},
-                {Error, State0}
-        end,
-
+    {Reply, State} = do_register_name(State0, GrainRef, Caller),
     {reply, Reply, State};
+
+%% handle_call({register_name, GrainRef}, {Caller, _}, State0)
+%% when is_pid(Caller) ->
+%%     %% This call can only be made locally, so if Caller is not a pid it would be
+%%     %% a partisan:pid() and thus we will match the fallback clause returning an
+%%     %% error.
+
+%%     %% We get all known registrations order by location local < node(), and then
+%%     %% by node().
+%%     Processes = lookup(GrainRef),
+
+%%     %% We then exclude unreachable grains
+%%     {Reply, State} =
+%%         case exclude_unreachable(Processes) of
+%%             [] ->
+%%                 %% Nothing registered or all unreachable, so we allow the local
+%%                 %% registration
+%%                 do_register_name(State0, GrainRef, Caller);
+
+%%             [ProcRef|_] ->
+%%                 %% We found at least one active grain that is reachable, so we
+%%                 %% pick it. If there was a local grain registered under GrainRef,
+%%                 %% ProcRef would be it (because of ordering guarantee).
+%%                 Error = {error, {already_in_use, ProcRef}},
+%%                 {Error, State0}
+%%         end,
+
+%%     {reply, Reply, State};
 
 handle_call({register_name, _}, _From, State) ->
     %% A call from a remote node, not allowed
@@ -855,6 +915,21 @@ terminate(_Reason, State) ->
 
 
 %% @private
+safe_call(ServerRef, Cmd) ->
+    safe_call(ServerRef, Cmd, ?TIMEOUT).
+
+
+%% @private
+safe_call(ServerRef, Cmd, Timeout) ->
+    try
+        partisan_gen_server:call(ServerRef, Cmd, Timeout)
+    catch
+      _:Reason:_ ->
+        {error, Reason}
+    end.
+
+
+%% @private
 add(#state{} = State, GrainKey, Value) ->
     add(#state{} = State, GrainKey, Value, partisan:node()).
 
@@ -924,6 +999,16 @@ monitor_lookup(Pid) ->
      case ets:lookup(?MONITOR_TAB, Pid) of
         [Monitor] ->
             Monitor;
+
+        _ ->
+            undefined
+    end.
+
+%% @private
+lookup_local_pid(GrainRef) ->
+     case ets:match_object(?MONITOR_TAB, {'_', GrainRef, '_'}) of
+        [{Pid, GrainRef, _}] ->
+            Pid;
 
         _ ->
             undefined
