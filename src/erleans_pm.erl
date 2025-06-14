@@ -208,7 +208,7 @@ register_name(Timeout) ->
                     %% node(), and then by node().
                     Processes = lookup(GrainRef),
 
-                    case exclude_unreachable(Processes) of
+                    case filter_alive(Processes) of
                         [] ->
                             safe_call(
                                 ?MODULE, {register_name, GrainRef}, Timeout
@@ -734,34 +734,6 @@ handle_call({register_name, GrainRef}, {Caller, _}, State0)
 when is_pid(Caller) ->
     {Reply, State} = do_register_name(State0, GrainRef, Caller),
     {reply, Reply, State};
-
-%% handle_call({register_name, GrainRef}, {Caller, _}, State0)
-%% when is_pid(Caller) ->
-%%     %% This call can only be made locally, so if Caller is not a pid it would be
-%%     %% a partisan:pid() and thus we will match the fallback clause returning an
-%%     %% error.
-
-%%     %% We get all known registrations order by location local < node(), and then
-%%     %% by node().
-%%     Processes = lookup(GrainRef),
-
-%%     %% We then exclude unreachable grains
-%%     {Reply, State} =
-%%         case exclude_unreachable(Processes) of
-%%             [] ->
-%%                 %% Nothing registered or all unreachable, so we allow the local
-%%                 %% registration
-%%                 do_register_name(State0, GrainRef, Caller);
-
-%%             [ProcRef|_] ->
-%%                 %% We found at least one active grain that is reachable, so we
-%%                 %% pick it. If there was a local grain registered under GrainRef,
-%%                 %% ProcRef would be it (because of ordering guarantee).
-%%                 Error = {error, {already_in_use, ProcRef}},
-%%                 {Error, State0}
-%%         end,
-
-%%     {reply, Reply, State};
 
 handle_call({register_name, _}, _From, State) ->
     %% A call from a remote node, not allowed
@@ -1362,14 +1334,22 @@ pick_alive([]) ->
 
 %% @private
 %% Returns a new list where all the process references are know to be
-%% reachable. A process is reachable if the process is local (and alive
-%% according to the existance of a monitor) or is remote and
-%% the node is connected (assumes full-mesh)
-exclude_unreachable(undefined) ->
+%% reachable. If the remote check fails, it returns false.
+filter_alive(undefined) ->
     [];
 
-exclude_unreachable(ProcRefs) when is_list(ProcRefs) ->
-    lists:filter(fun is_reachable/1, ProcRefs).
+filter_alive(ProcRefs) when is_list(ProcRefs) ->
+    lists:filter(
+        fun(ProcRef) ->
+            try
+                partisan:is_process_alive(ProcRef)
+            catch
+              _:_ ->
+                false
+            end
+        end,
+        ProcRefs
+    ).
 
 
 %% @private
