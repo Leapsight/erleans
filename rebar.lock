@@ -1,6 +1,5 @@
 {"1.2.0",
-[{<<"acceptor_pool">>,{pkg,<<"acceptor_pool">>,<<"1.0.0">>},1},
- {<<"app_config">>,
+[{<<"app_config">>,
   {git,"https://github.com/leapsight/app_config.git",
        {ref,"6c4aee8fc3d08b59e22183a530cb4ce29d4b348b"}},
   1},
@@ -54,7 +53,7 @@
   0},
  {<<"partisan">>,
   {git,"http://github.com/lasp-lang/partisan.git",
-       {ref,"7d1abc22f1b2af3296afd5b20c9978197c1f7add"}},
+       {ref,"8d4c79e98fe36aa763bbb60048a5453c06a42dd3"}},
   0},
  {<<"quickrand">>,{pkg,<<"quickrand">>,<<"2.0.7">>},1},
  {<<"resulto">>,{pkg,<<"resulto">>,<<"0.2.3">>},0},
@@ -75,7 +74,6 @@
   2}]}.
 [
 {pkg_hash,[
- {<<"acceptor_pool">>, <<"43C20D2ACAE35F0C2BCD64F9D2BDE267E459F0F3FD23DAB26485BF518C281B21">>},
  {<<"cf">>, <<"5CB902239476E141EA70A740340233782D363A31EEA8AD37049561542E6CD641">>},
  {<<"erlware_commons">>, <<"00F336AE1AB5880253F64217A3988998A54EFFDEB6EF2BFF1A1F8AE667075983">>},
  {<<"gproc">>, <<"AA9EC57F6C9FF065B16D96924168D7C7157CD1FD457680EFE4B1274F456FA500">>},
@@ -85,7 +83,6 @@
  {<<"types">>, <<"5782B67231E8C174FE2835395E71E669FE0121076779D2A09F1C0D58EE0E2F13">>},
  {<<"uuid">>, <<"B2078D2CC814F53AFA52D36C91E08962C7E7373585C623F4C0EA6DFB04B2AF94">>}]},
 {pkg_hash_ext,[
- {<<"acceptor_pool">>, <<"0CBCD83FDC8B9AD2EEE2067EF8B91A14858A5883CB7CD800E6FCD5803E158788">>},
  {<<"cf">>, <<"315E8D447D3A4B02BCDBFA397AD03BBB988A6E0AA6F44D3ADD0F4E3C3BF97672">>},
  {<<"erlware_commons">>, <<"C0850EF4FFC031BA61393392316B512EBADF731C66F6E1E3FB014F35F877B33B">>},
  {<<"gproc">>, <<"109F253C2787DE8A371A51179D4973230CBEC6239EE673FA12216A5CE7E4F902">>},
