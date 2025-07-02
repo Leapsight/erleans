@@ -1,7 +1,7 @@
 -module(erleans_provider_ets).
 
 -behaviour(erleans_provider).
--behaviour(gen_server).
+-behaviour(partisan_gen_server).
 
 -export([start_link/2,
          all/2,
@@ -19,7 +19,7 @@
          handle_info/2]).
 
 start_link(ProviderName, Args) ->
-    gen_server:start_link({local, ProviderName}, ?MODULE, [ProviderName, Args], []).
+    partisan_gen_server:start_link({local, ProviderName}, ?MODULE, [ProviderName, Args], []).
 
 all(Type, ProviderName) ->
     try

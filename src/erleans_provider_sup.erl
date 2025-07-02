@@ -23,10 +23,10 @@
          init/1]).
 
 start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+    partisan_gen_supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 start_child(Name, ProviderOpts) ->
-    supervisor:start_child(?MODULE, [Name, ProviderOpts]).
+    partisan_gen_supervisor:start_child(?MODULE, [Name, ProviderOpts]).
 
 init(_Args) ->
     SupFlags = #{strategy => simple_one_for_one,

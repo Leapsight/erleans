@@ -17,7 +17,7 @@
 %% =============================================================================
 
 -module(erleans_table_owner).
--behaviour(gen_server).
+-behaviour(partisan_gen_server).
 
 
 %% API
@@ -88,7 +88,7 @@ exists(Name) ->
 
 add(Name, Opts) when
 is_atom(Name) andalso Name =/= undefined andalso is_list(Opts) ->
-    gen_server:call(?MODULE, {add, Name, Opts}).
+    partisan_gen_server:call(?MODULE, {add, Name, Opts}).
 
 
 %% -----------------------------------------------------------------------------
@@ -101,7 +101,7 @@ is_atom(Name) andalso Name =/= undefined andalso is_list(Opts) ->
 
 add_and_claim(Name, Opts) when
 is_atom(Name) andalso Name =/= undefined andalso is_list(Opts) ->
-    gen_server:call(?MODULE, {add_and_claim, Name, Opts}).
+    partisan_gen_server:call(?MODULE, {add_and_claim, Name, Opts}).
 
 
 %% -----------------------------------------------------------------------------
@@ -115,7 +115,7 @@ is_atom(Name) andalso Name =/= undefined andalso is_list(Opts) ->
 
 add_or_claim(Name, Opts) when
 is_atom(Name) andalso Name =/= undefined andalso is_list(Opts) ->
-    gen_server:call(?MODULE, {add_or_claim, Name, Opts}).
+    partisan_gen_server:call(?MODULE, {add_or_claim, Name, Opts}).
 
 
 %% -----------------------------------------------------------------------------
@@ -127,7 +127,7 @@ is_atom(Name) andalso Name =/= undefined andalso is_list(Opts) ->
 delete(Name) when is_atom(Name) ->
     try ets:delete(Name) of
         true ->
-            gen_server:call(?MODULE, {delete, Name})
+            partisan_gen_server:call(?MODULE, {delete, Name})
     catch
         _:badarg ->
             %% Not the owner
@@ -144,7 +144,7 @@ delete(Name) when is_atom(Name) ->
 -spec claim(Name :: atom()) -> boolean().
 
 claim(Name) when is_atom(Name)->
-    gen_server:call(?MODULE, {give_away, Name, self()}).
+    partisan_gen_server:call(?MODULE, {give_away, Name, self()}).
 
 
 %% -----------------------------------------------------------------------------
@@ -157,7 +157,7 @@ claim(Name) when is_atom(Name)->
 
 give_away(Name, NewOwner)
 when is_atom(Name) andalso Name =/= undefined andalso is_pid(NewOwner) ->
-    gen_server:call(?MODULE, {give_away, Name, NewOwner}).
+    partisan_gen_server:call(?MODULE, {give_away, Name, NewOwner}).
 
 
 
@@ -170,7 +170,7 @@ when is_atom(Name) andalso Name =/= undefined andalso is_pid(NewOwner) ->
 -spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 
 

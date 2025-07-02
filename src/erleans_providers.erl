@@ -1,6 +1,6 @@
 -module(erleans_providers).
 
--behaviour(gen_server).
+-behaviour(partisan_gen_server).
 
 -export([start_link/0,
          default/0,
@@ -15,7 +15,7 @@
 -record(state, {providers :: term()}).
 
 start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 default() ->
     persistent_term:get({?MODULE, default_provider}).

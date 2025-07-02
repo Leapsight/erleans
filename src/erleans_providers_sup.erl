@@ -19,7 +19,7 @@
 
 -module(erleans_providers_sup).
 
--behaviour(supervisor).
+-behaviour(partisan_gen_supervisor).
 
 -export([start_link/0]).
 
@@ -29,7 +29,7 @@
 
 -spec start_link() -> {ok, pid()}.
 start_link() ->
-    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+    partisan_gen_supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 init([]) ->
     SupFlags = #{strategy => one_for_all,

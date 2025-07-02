@@ -20,7 +20,7 @@
 %%% ---------------------------------------------------------------------------
 -module(erleans_config).
 
--behaviour(gen_server).
+-behaviour(partisan_gen_server).
 
 -export([start_link/1,
          get/1,
@@ -39,7 +39,7 @@
                 tid :: ets:tid()}).
 
 start_link(Config) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, Config, []).
+    partisan_gen_server:start_link({local, ?MODULE}, ?MODULE, Config, []).
 
 -spec get(atom()) -> any().
 get(Key) ->
@@ -55,7 +55,7 @@ get(Key, Default) ->
     end.
 
 set(Key, Value) ->
-    gen_server:call(?MODULE, {set, Key, Value}).
+    partisan_gen_server:call(?MODULE, {set, Key, Value}).
 
 init(Config) ->
     Tid = ets:new(?TABLE, [protected, named_table, set, {read_concurrency, true}]),
