@@ -8,7 +8,7 @@ clean:
 	$(REBAR) clean
 
 test: eunit cover
-	${REBAR} as test ct
+	CMAKE_POLICY_VERSION_MINIMUM=3.5 ${REBAR} as test ct
 
 eunit:
 	${REBAR} as test eunit
