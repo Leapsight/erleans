@@ -39,7 +39,7 @@ init([]) ->
                     start => {erleans_provider_sup, start_link, []},
                     restart => permanent,
                     type => supervisor,
-                    shutdown => 5000},
+                    shutdown => infinity},
                   #{id => erleans_providers,
                     start => {erleans_providers, start_link, []},
                     restart => permanent,
