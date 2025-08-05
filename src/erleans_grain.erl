@@ -727,7 +727,7 @@ maybe_crash(_) ->
 set_partisan_channel(Mod) ->
     case erleans_utils:fun_or_default(Mod, options, #{}) of
         #{channel := Channel} ->
-            partisan_gen:set_opts([channel, Channel]);
+            partisan_gen:set_opts([{channel, Channel}]);
         _ ->
             ok
     end.
