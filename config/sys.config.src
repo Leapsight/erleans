@@ -1,7 +1,8 @@
 %% -*- erlang -*-
 [{erleans, [{providers, #{in_memory => #{module => erleans_provider_ets,
                                          args => #{}}}},
-            {default_provider, in_memory}
+            {default_provider, in_memory},
+            {pm_partitions, 4}
            ]},
 
  {partisan, [

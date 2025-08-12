@@ -29,6 +29,7 @@ init_per_suite(Config) ->
     application:load(erleans),
     application:set_env(partisan, peer_port, 10200),
     application:set_env(partisan, pid_encoding, false),
+    application:set_env(partisan, partisan_peer_service_manager, partisan_pluggable_peer_service_manager),
     %% lower gossip interval of partisan membership so it triggers more often
     %% in tests
     application:set_env(partisan, periodic_enabled, true),
@@ -240,6 +241,7 @@ start_nodes([{Node, PeerPort} | T], Acc) ->
         {application, set_env, [partisan, periodic_enabled, true]},
         {application, set_env, [partisan, periodic_interval, 100]},
         {application, set_env, [partisan, peer_port, PeerPort]},
+        {application, set_env, [partisan, partisan_peer_service_manager, partisan_pluggable_peer_service_manager]},
         {application, ensure_all_started, [partisan]},
         {application, ensure_all_started, [bondy_mst]},
         {application, ensure_all_started, [erleans]}
