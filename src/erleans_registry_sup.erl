@@ -68,7 +68,7 @@ init([]) ->
     %% Create child specs for N partition workers
     Children = [
         #{
-            id => {erleans_registry_partition, PartitionId},
+            id => erleans_registry_partition:partition_name(PartitionId),
             start => {erleans_registry_partition, start_link, [PartitionId, ?POOL_NAME]},
             restart => permanent,
             shutdown => 5000,

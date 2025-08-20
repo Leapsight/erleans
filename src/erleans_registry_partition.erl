@@ -71,6 +71,7 @@ This is stored on `bondy_mst`.
 
 %% API - Partition-specific functions (called by erleans_pm router)
 -export([start_link/2]).
+-export([partition_name/1]).
 -export([register_name/2]).
 -export([unregister_name/2]).
 -export([whereis_name/2]).
@@ -123,11 +124,18 @@ This is stored on `bondy_mst`.
 %% =============================================================================
 
 ?DOC("""
+Returns the registered name for a partition ID.
+""").
+-spec partition_name(pos_integer()) -> atom().
+partition_name(PartitionId) ->
+    list_to_atom("erleans_registry_partition_" ++ integer_to_list(PartitionId)).
+
+?DOC("""
 Starts a partition server with given ID and registers it in gproc_pool.
 """).
 -spec start_link(pos_integer(), atom()) -> {ok, pid()} | {error, term()}.
 start_link(PartitionId, PoolName) ->
-    Name = list_to_atom("erleans_registry_partition_" ++ integer_to_list(PartitionId)),
+    Name = partition_name(PartitionId),
     partisan_gen_server:start_link({local, Name}, ?MODULE, [PartitionId, PoolName], ?OPTS).
 
 ?DOC("""
@@ -304,7 +312,7 @@ init([PartitionId, PoolName]) ->
         end,
         store => bondy_mst_ets_store,
         store_opts => #{
-            name => atom_to_binary(list_to_atom("erleans_registry_partition_" ++ integer_to_list(PartitionId))),
+            name => atom_to_binary(partition_name(PartitionId)),
             persistent => true
         },
         callback_mod => ?MODULE,
