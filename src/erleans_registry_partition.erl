@@ -405,7 +405,7 @@ partisan_plumtree_broadcast_handler behaviour.
 """).
 -spec is_stale(gossip_id()) -> boolean().
 
-is_stale({Peer, Root}) ->
+is_stale({_Peer, _Root}) ->
     %% In our case the I_HAVE message is the root of the peer's tree, so we
     %% always return `true` signaling Plumtree that we do not need the message,
     %% and we send ourself a message to potentially init a merge with the peer
@@ -424,9 +424,9 @@ is_stale({Peer, Root}) ->
     %% Option 5: initiate a merge with the same partition on ther Peer node
 
     %% Determine which partition this is by looking at the calling process
-    {registered_name, PartitionName} = erlang:process_info(self(), registered_name),
+    % {registered_name, PartitionName} = erlang:process_info(self(), registered_name),
     %% Cast to the same partition on the peer node
-    partisan_gen_server:cast({PartitionName, Peer}, {crdt_maybe_merge, partisan:node(), Root}),
+    % partisan_gen_server:cast({PartitionName, Peer}, {crdt_maybe_merge, partisan:node(), Root}),
     true.
 
 
