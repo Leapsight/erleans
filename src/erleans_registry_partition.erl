@@ -345,7 +345,8 @@ partisan_plumtree_broadcast_handler behaviour.
     boolean().
 
 merge(_Id, Gossip) ->
-    partisan_gen_server:call(?MODULE, {crdt_merge, Gossip}).
+    PartitionPid = select_partition_for_gossip(Gossip),
+    partisan_gen_server:call(PartitionPid, {crdt_merge, Gossip}).
 
 
 ?DOC("""
@@ -362,7 +363,18 @@ partisan_plumtree_broadcast_handler behaviour.
     Payload :: bondy_mst_crdt:gossip()) -> boolean().
 
 merge(Peer, _Root, Gossip) ->
-    partisan_gen_server:call({?MODULE, Peer}, {crdt_merge, Gossip}).
+    %% For remote calls, we need the registered name, not the PID
+    PartitionPid = select_partition_for_gossip(Gossip),
+    case erlang:process_info(PartitionPid, registered_name) of
+        {registered_name, PartitionName} ->
+            try
+                partisan_gen_server:call({PartitionName, Peer}, {crdt_merge, Gossip})
+            catch
+                _:_ -> false  % Return false if the call fails
+            end;
+        undefined -> 
+            false  % Return false if partition not registered
+    end.
 
 
 ?DOC("""
@@ -394,7 +406,22 @@ is_stale({Peer, Root}) ->
     %% and we send ourself a message to potentially init a merge with the peer
     %% i.e. in this case we take the job of synchonising the CRDT in out hands
     %% instead of relying on Plumtree.
-    ok = partisan_gen_server:cast(?MODULE, {crdt_maybe_merge, Peer, Root}),
+    %% 
+    %% Since we don't have gossip context here, we broadcast to all partitions
+    %% Each partition will check if it's stale for this peer/root combination
+    
+    
+    %% TODO: it could be wrong!!!!
+    %% Option 1: Route to All Partitions (Current - but inefficient)
+    %% Option 2: Always Return true (Skip Plumtree optimization)
+    %% Option 3: Use a Single Coordinator Partition
+    %% Option 4: Hash the Peer Node for Distribution
+    %% Option 5: initiate a merge with the same partition on ther Peer node
+
+    %% Determine which partition this is by looking at the calling process
+    {registered_name, PartitionName} = erlang:process_info(self(), registered_name),
+    %% Cast to the same partition on the peer node
+    partisan_gen_server:cast({PartitionName, Peer}, {crdt_maybe_merge, partisan:node(), Root}),
     true.
 
 
@@ -456,7 +483,24 @@ Triggers a synchronisation exchange with a peer.
 -spec sync(node(), map()) -> ok | {error, term()}.
 
 sync(Peer, Opts) ->
-    partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
+    %% Option 1: Parallel async calls (most efficient)
+    %% Option 2: Parallel calls with timeout
+    %% Option 3: Sequential calls (least efficient)
+    %% Trigger sync on all partitions since sync is a global operation
+    Workers = erleans_pm:get_all_partition_pids(),
+    [partisan_gen_server:cast(Pid, {crdt_trigger, Peer, Opts}) || Pid <- Workers],
+    ok.
+    
+    % Results = [partisan_gen_server:call(Pid, {crdt_trigger, Peer, Opts}) || Pid <- Workers],
+    % %% Return ok if any partition succeeded, otherwise return the first error
+    % case lists:any(fun(Result) -> Result =:= ok end, Results) of
+    %     true -> ok;
+    %     false -> 
+    %         case lists:keyfind(error, 1, Results) of
+    %             false -> ok;
+    %             Error -> Error
+    %         end
+    % end.
 
 
 
@@ -1210,6 +1254,29 @@ unregister_local(#state{partition_id = PartitionId} = State0, Pid) when is_pid(P
 
 unregister_local(_, '$end_of_table') ->
     ok.
+
+
+%% @private
+%% Selects the appropriate partition PID for a gossip message based on the grain key
+select_partition_for_gossip(Gossip) ->
+    #{key := Key} = bondy_mst_crdt:gossip_data(Gossip),
+    case Key of
+        undefined ->
+            %% For sync messages without specific key, use the first partition
+            [FirstPid | _] = erleans_pm:get_all_partition_pids(),
+            FirstPid;
+        {Id, Mod} ->
+            %% Key is already in grain_key format, create grain_ref and route
+            GrainRef = #{id => Id, implementing_module => Mod},
+            erleans_pm:select_partition(GrainRef);
+        GrainKey ->
+            %% Fallback for other key formats - log to understand usage
+            ?LOG_WARNING("Unexpected grain key format in gossip: ~p", [GrainKey]),
+            GrainRef = #{id => GrainKey, implementing_module => undefined},
+            erleans_pm:select_partition(GrainRef)
+    end.
+
+
 
 
 

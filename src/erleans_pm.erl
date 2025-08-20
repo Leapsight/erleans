@@ -52,6 +52,7 @@ partition for each grain based on its grain_key().
 %% Partition selection
 -export([select_partition/1]).
 -export([get_all_partition_pids/0]).
+-export([grain_key/1]).
 
 %% TEST API
 -ifdef(TEST).
@@ -244,7 +245,9 @@ select_partition(GrainRef) ->
 
 
 
-%% @private
+?DOC("""
+Extracts the grain key from a grain reference for consistent hashing.
+""").
 -spec grain_key(erleans:grain_ref()) -> {term(), module()}.
 
 grain_key(#{id := Id, implementing_module := Mod}) ->
