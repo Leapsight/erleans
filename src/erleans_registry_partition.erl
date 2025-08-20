@@ -127,7 +127,7 @@ Starts a partition server with given ID and registers it in gproc_pool.
 """).
 -spec start_link(pos_integer(), atom()) -> {ok, pid()} | {error, term()}.
 start_link(PartitionId, PoolName) ->
-    Name = {?MODULE, PartitionId},
+    Name = list_to_atom("erleans_registry_partition_" ++ integer_to_list(PartitionId)),
     partisan_gen_server:start_link({local, Name}, ?MODULE, [PartitionId, PoolName], ?OPTS).
 
 ?DOC("""
