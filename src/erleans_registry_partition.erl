@@ -212,7 +212,7 @@ Implementation of the `bondy_mst_crdt` callback.
 Removes stale entries and duplicates after merge.
 """).
 on_merge(Peer) ->
-    partisan_gen_server:cast(?MODULE, {crdt_on_merge, Peer}).
+    partisan_gen_server:cast(self(), {crdt_on_merge, Peer}).
 
 %% =============================================================================
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
@@ -237,7 +237,7 @@ broadcast_data(Gossip) ->
 
 -spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_crdt:gossip()) -> boolean().
 merge(_Id, Gossip) ->
-    partisan_gen_server:call(?MODULE, {crdt_merge, Gossip}).
+    partisan_gen_server:call(self(), {crdt_merge, Gossip}).
 
 -spec merge(Peer :: node(), Root :: bondy_mst:hash(), Payload :: bondy_mst_crdt:gossip()) -> boolean().
 merge(Peer, _Root, Gossip) ->
@@ -245,7 +245,7 @@ merge(Peer, _Root, Gossip) ->
 
 -spec is_stale(gossip_id()) -> boolean().
 is_stale({Peer, Root}) ->
-    ok = partisan_gen_server:cast(?MODULE, {crdt_maybe_merge, Peer, Root}),
+    ok = partisan_gen_server:cast(self(), {crdt_maybe_merge, Peer, Root}),
     true.
 
 -spec graft(gossip_id()) -> stale | {ok, bondy_mst_crdt:gossip()} | {error, term()}.
@@ -267,7 +267,7 @@ sync(Peer) ->
     sync(Peer, #{}).
 
 sync(Peer, Opts) ->
-    partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
+    partisan_gen_server:call(self(), {crdt_trigger, Peer, Opts}).
 
 %% =============================================================================
 %% PARTISAN_GEN_SERVER BEHAVIOR CALLBACKS
