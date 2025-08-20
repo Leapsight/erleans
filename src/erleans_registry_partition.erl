@@ -207,13 +207,24 @@ Implementation of the `bondy_mst_crdt` callback.
 Casts message `Message` to this server on node `Peer` using `partisan`.
 """).
 send(Peer, Message) ->
-    partisan_gen_server:cast({?MODULE, Peer}, {crdt_message, Message}).
+    %% Send to all partitions since this is CRDT coordination
+    Pids = erleans_pm:get_all_partition_pids(),
+    [partisan_gen_server:cast(Pid, {crdt_message, Message}) || Pid <- Pids],
+    ok.
 
 ?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
 Broadcasts message `Gossip` to peers using Plumtree.
 """).
 broadcast(Gossip) ->
+    %% For broadcast, we can either:
+    %% 1. Route based on gossip data peer, or
+    %% 2. Broadcast to all partitions
+    %% Let's use all partitions since broadcast should be global
+    Pids = erleans_pm:get_all_partition_pids(),
+    lists:foreach(fun(Pid) ->
+        partisan_gen_server:cast(Pid, {crdt_broadcast, Gossip})
+    end, Pids),
     partisan:broadcast(Gossip, ?MODULE).
 
 ?DOC("""
@@ -221,7 +232,9 @@ Implementation of the `bondy_mst_crdt` callback.
 Removes stale entries and duplicates after merge.
 """).
 on_merge(Peer) ->
-    partisan_gen_server:cast(self(), {crdt_on_merge, Peer}).
+    %% Notify all partitions about merge completion
+    Pids = erleans_pm:get_all_partition_pids(),
+    [partisan_gen_server:cast(Pid, {crdt_on_merge, Peer}) || Pid <- Pids].
 
 %% =============================================================================
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
@@ -246,7 +259,11 @@ broadcast_data(Gossip) ->
 
 -spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_crdt:gossip()) -> boolean().
 merge(_Id, Gossip) ->
-    partisan_gen_server:call(self(), {crdt_merge, Gossip}).
+    %% Merge on all partitions since each has its own CRDT
+    Pids = erleans_pm:get_all_partition_pids(),
+    Results = [partisan_gen_server:call(Pid, {crdt_merge, Gossip}) || Pid <- Pids],
+    %% Return true if any partition handled it successfully
+    lists:any(fun(R) -> R =:= true end, Results).
 
 -spec merge(Peer :: node(), Root :: bondy_mst:hash(), Payload :: bondy_mst_crdt:gossip()) -> boolean().
 merge(Peer, _Root, Gossip) ->
@@ -254,7 +271,9 @@ merge(Peer, _Root, Gossip) ->
 
 -spec is_stale(gossip_id()) -> boolean().
 is_stale({Peer, Root}) ->
-    ok = partisan_gen_server:cast(self(), {crdt_maybe_merge, Peer, Root}),
+    %% Check staleness across all partitions
+    Pids = erleans_pm:get_all_partition_pids(),
+    [partisan_gen_server:cast(Pid, {crdt_maybe_merge, Peer, Root}) || Pid <- Pids],
     true.
 
 -spec graft(gossip_id()) -> stale | {ok, bondy_mst_crdt:gossip()} | {error, term()}.
@@ -276,7 +295,14 @@ sync(Peer) ->
     sync(Peer, #{}).
 
 sync(Peer, Opts) ->
-    partisan_gen_server:call(self(), {crdt_trigger, Peer, Opts}).
+    %% Trigger sync on all partitions
+    Pids = erleans_pm:get_all_partition_pids(),
+    Results = [partisan_gen_server:call(Pid, {crdt_trigger, Peer, Opts}) || Pid <- Pids],
+    %% Return the first successful result
+    case lists:dropwhile(fun({error, _}) -> true; (_) -> false end, Results) of
+        [First | _] -> First;
+        [] -> {error, no_partitions_available}
+    end.
 
 %% =============================================================================
 %% PARTISAN_GEN_SERVER BEHAVIOR CALLBACKS
