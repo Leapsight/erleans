@@ -45,23 +45,23 @@ start_link() ->
 init([]) ->
     %% Get number of partitions from configuration
     N = erleans_config:get(pm_partitions, 1),
-    
-    ?LOG_INFO("Starting erleans registry with ~p partitions", [N]),
-    
+
+    ?LOG_INFO(#{message => "Starting erleans registry with partitions", partitions => N}),
+
     %% Create the gproc_pool first
     try
         gproc_pool:new(?POOL_NAME, hash, [{size, N}]),
-        ?LOG_INFO("Created gproc_pool ~p with size ~p", [?POOL_NAME, N]),
+        ?LOG_INFO(#{message => "Created gproc_pool", pool => ?POOL_NAME, size => N}),
         
         %% Add workers to the pool for each partition
         [gproc_pool:add_worker(?POOL_NAME, {partition, PartitionId}, PartitionId) 
          || PartitionId <- lists:seq(1, N)],
-        ?LOG_INFO("Added ~p workers to pool ~p", [N, ?POOL_NAME])
+        ?LOG_INFO(#{message => "Added workers to pool", count => N, pool => ?POOL_NAME})
     catch
         error:exists ->
-            ?LOG_INFO("gproc_pool ~p already exists", [?POOL_NAME]);
+            ?LOG_INFO(#{message => "gproc_pool already exists", pool => ?POOL_NAME});
         Error:Reason ->
-            ?LOG_ERROR("Failed to create gproc_pool ~p: ~p:~p", [?POOL_NAME, Error, Reason]),
+            ?LOG_ERROR(#{message => "Failed to create gproc_pool", pool => ?POOL_NAME, error => {Error, Reason}}),
             error({gproc_pool_creation_failed, Error, Reason})
     end,
     

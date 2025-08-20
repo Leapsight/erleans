@@ -53,7 +53,7 @@ setup_partisan() ->
     Overrides = #{
         broadcast_mods => ordsets:to_list(
             ordsets:union(
-                ordsets:from_list([erleans_registry_partition, partisan_plumtree_backend]),
+                ordsets:from_list([partisan_plumtree_backend]),
                 ordsets:from_list(BroadcastMods)
             )
         )

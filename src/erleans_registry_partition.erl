@@ -240,8 +240,13 @@ where Args is the list of arguments passed to the callback.
 """).
 %% CRDT callback router - handles callback_mfa pattern correctly
 crdt_callback(PartitionName, Function, Args) ->
-    ?LOG_DEBUG("CRDT callback: partition=~p, function=~p, args=~p", [PartitionName, Function, Args]),
-    
+    ?LOG_DEBUG(#{
+        message => "CRDT callback",
+        partition => PartitionName,
+        function => Function,
+        args => Args
+    }),
+
     case Function of
         send ->
             [Peer, Message] = Args,
@@ -532,6 +537,7 @@ init([PartitionId, PoolName]) ->
     ),
 
     %% We monitor all nodes so that we can cleanup our view of the registry
+    %% Just start monitoring - partisan handles multiple calls gracefully
     partisan:monitor_nodes(true),
 
     {channel, Channel} = lists:keyfind(channel, 1, partisan_gen:get_opts()),
@@ -579,9 +585,18 @@ init([PartitionId, PoolName]) ->
     %% Connect to gproc_pool immediately
     case gproc_pool:connect_worker(PoolName, {partition, PartitionId}) of
         true ->
-            ?LOG_INFO("Successfully connected partition ~p to pool ~p", [PartitionId, PoolName]);
+            ?LOG_INFO(#{
+                message => "Successfully connected partition",
+                partition => PartitionId,
+                pool => PoolName
+            });
         Error ->
-            ?LOG_ERROR("Failed to connect partition ~p to pool ~p: ~p", [PartitionId, PoolName, Error]),
+            ?LOG_ERROR(#{
+                message => "Failed to connect partition",
+                partition => PartitionId,
+                pool => PoolName,
+                error => Error
+            }),
             error({pool_connection_failed, Error})
     end,
     
@@ -825,16 +840,27 @@ handle_info({nodeup, _Node}, State) ->
     {noreply, State};
 
 handle_info({'DOWN', MRef, process, Pid, _Info}, State0) when is_pid(Pid) ->
-    ?LOG_INFO("Grain down ~p", [{Pid, MRef}]),
+    ?LOG_INFO(#{message => "Grain down", pid => Pid, mref => MRef}),
     {_, State} = do_unregister_process(State0, Pid),
     {noreply, State};
 
 handle_info(Event, State) ->
-    ?LOG_INFO("Received unknown event ~p", [Event]),
+    ?LOG_INFO(#{message => "Received unknown event", event => Event}),
     {noreply, State}.
 
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()), State :: t()) -> ok.
 terminate(_Reason, #state{partition_id = PartitionId} = State) ->
+    %% Only stop monitoring if we're the last partition
+    try
+        case length(erleans_pm:get_all_partition_pids()) =< 1 of
+            true -> 
+                partisan:monitor_nodes(false);
+            false -> 
+                ok  % Other partitions still need monitoring
+        end
+    catch
+        _:_ -> ok  % Ignore errors during shutdown
+    end,
     ok = unregister_all_local(State),
     _ = persistent_term:erase(?PERSISTENT_KEY(PartitionId)),
     ok.
@@ -1236,7 +1262,7 @@ unregister_all_local(#state{partition_id = PartitionId} = State) ->
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
-                message => "Unexpected error",
+                message => "Unexpected error unregistering local grains",
                 class => Class,
                 reason => Reason,
                 stacktrace => Stacktrace
@@ -1271,7 +1297,10 @@ select_partition_for_gossip(Gossip) ->
             erleans_pm:select_partition(GrainRef);
         GrainKey ->
             %% Fallback for other key formats - log to understand usage
-            ?LOG_WARNING("Unexpected grain key format in gossip: ~p", [GrainKey]),
+            ?LOG_WARNING(#{
+                message => "Unexpected grain key format in gossip",
+                grain_key => GrainKey
+            }),
             GrainRef = #{id => GrainKey, implementing_module => undefined},
             erleans_pm:select_partition(GrainRef)
     end.
