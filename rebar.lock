@@ -13,7 +13,7 @@
   1},
  {<<"bondy_mst">>,
   {git,"https://github.com/bondy-io/bondy_mst.git",
-       {ref,"4a0da7062ac8435a8e3f59d3d58c1e5476ec1ec6"}},
+       {ref,"2c9419bb7424e8b175bcbb057784b8088ea222d8"}},
   0},
  {<<"cf">>,{pkg,<<"cf">>,<<"0.3.1">>},1},
  {<<"erlware_commons">>,{pkg,<<"erlware_commons">>,<<"1.8.1">>},0},

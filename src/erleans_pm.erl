@@ -48,11 +48,10 @@ partition for each grain based on its grain_key().
 -export([to_list/1]).
 -export([lookup/1]).
 -export([info/0]).
--export([sync/1]).
--export([sync/2]).
 
 %% Partition selection
 -export([select_partition/1]).
+-export([get_all_partition_pids/0]).
 
 %% TEST API
 -ifdef(TEST).
@@ -62,20 +61,35 @@ partition for each grain based on its grain_key().
     -export([unregister_name_/2]).
 -endif.
 
+
+
 %% =============================================================================
 %% API
 %% =============================================================================
+
+
 
 ?DOC("""
 Starts the registry supervisor which manages N partition processes.
 """).
 -spec start_link() -> {ok, pid()} | {error, term()}.
+
 start_link() ->
     erleans_registry_sup:start_link().
+
 
 ?DOC("""
 Registers the calling process with the `grain_key()` derived from its
 `erleans:grain_ref()`.
+
+The duplicate check logic is executed by the caller concurrently while the
+actual registration is serialised via the `erleans_pm` server process.
+
+Returns an error with the following reasons:
+* `badgrain` if the calling process is not an Erleans grain.
+* `timeout` if there was no response from the server within the requested time
+* `{already_in_use, partisan_remote_ref:p()}` if there is already a process
+registered for the same `grain_key()`.
 
 Routes the call to the appropriate partition based on consistent hashing.
 """).
@@ -85,14 +99,17 @@ Routes the call to the appropriate partition based on consistent hashing.
     | {error, timeout}
     | {error, noproc}
     | {error, {already_in_use, partisan_remote_ref:p()}}.
+
 register_name() ->
     register_name(?TIMEOUT).
+
 
 -spec register_name(timeout()) ->
     ok
     | {error, badgrain}
     | {error, timeout}
     | {error, {already_in_use, partisan_remote_ref:p()}}.
+
 register_name(_Timeout) ->
     case erleans:grain_ref() of
         undefined ->
@@ -102,10 +119,12 @@ register_name(_Timeout) ->
             erleans_registry_partition:register_name(PartitionPid, GrainRef)
     end.
 
+
 ?DOC("""
 Unregisters a grain from the appropriate partition.
 """).
 -spec unregister_name() -> ok | {error, badgrain}.
+
 unregister_name() ->
     case erleans:grain_ref() of
         undefined ->
@@ -115,33 +134,41 @@ unregister_name() ->
             erleans_registry_partition:unregister_name(PartitionPid, GrainRef)
     end.
 
+
 ?DOC("""
 Returns a process reference for `GrainRef` from the appropriate partition.
 """).
 -spec whereis_name(GrainRef :: erleans:grain_ref()) ->
     partisan_remote_ref:p() | undefined.
+
 whereis_name(GrainRef) ->
     whereis_name(GrainRef, [safe]).
 
+
 -spec whereis_name(GrainRef :: erleans:grain_ref(), Opts :: [safe | unsafe]) ->
     partisan_remote_ref:p() | undefined.
+
 whereis_name(GrainRef, Opts) ->
     PartitionPid = select_partition(GrainRef),
     erleans_registry_partition:whereis_name(PartitionPid, GrainRef, Opts).
+
 
 ?DOC("""
 Lookups all registered grains under name `GrainRef` from the appropriate partition.
 """).
 -spec lookup(GrainRef :: erleans:grain_ref()) -> [partisan_remote_ref:p()].
+
 lookup(GrainRef) ->
     PartitionPid = select_partition(GrainRef),
     erleans_registry_partition:lookup(PartitionPid, GrainRef).
+
 
 ?DOC("""
 Returns the `erleans:grain_ref` for a pid or process reference.
 """).
 -spec grain_ref(partisan:any_pid()) ->
     {ok, erleans:grain_ref()} | {error, timeout | any()}.
+
 grain_ref(ProcRef) ->
     %% For grain_ref lookup, we need to try all partitions since we don't know
     %% which partition the process belongs to. We can optimize this later.
@@ -153,14 +180,18 @@ grain_ref(ProcRef) ->
         end
     end).
 
+
 ?DOC("""
 Returns the list of all registry entries from all partitions.
 """).
 -spec to_list() -> [{grain_key(), partisan_remote_ref:p()}].
+
 to_list() ->
     to_list([safe]).
 
+
 -spec to_list([safe | unsafe]) -> [{grain_key(), partisan_remote_ref:p()}].
+
 to_list(Opts) ->
     %% Collect results from all partitions
     Workers = get_all_partition_pids(),
@@ -168,6 +199,7 @@ to_list(Opts) ->
         erleans_registry_partition:to_list(PartitionPid, Opts)
         || PartitionPid <- Workers
     ]).
+
 
 ?DOC("""
 Returns information from all partitions.
@@ -183,33 +215,18 @@ info() ->
         partitions => PartitionInfos
     }.
 
-?DOC("""
-Triggers synchronization with a peer across all partitions.
-""").
--spec sync(node()) -> [ok | {error, term()}].
-sync(Peer) ->
-    sync(Peer, #{}).
-
--spec sync(node(), map()) -> [ok | {error, term()}].
-sync(Peer, Opts) ->
-    Workers = get_all_partition_pids(),
-    [
-        try
-            partisan_gen_server:call(PartitionPid, {crdt_trigger, Peer, Opts})
-        catch
-            _:Reason -> {error, Reason}
-        end
-        || PartitionPid <- Workers
-    ].
 
 %% =============================================================================
 %% PARTITION SELECTION
 %% =============================================================================
 
+
+
 ?DOC("""
 Selects the appropriate partition for a given GrainRef using gproc_pool.
 """).
 -spec select_partition(erleans:grain_ref()) -> pid().
+
 select_partition(GrainRef) ->
     GrainKey = grain_key(GrainRef),
     case gproc_pool:pick_worker(erleans_registry_pool, GrainKey) of
@@ -219,22 +236,24 @@ select_partition(GrainRef) ->
             Pid
     end.
 
+
+
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
 
+
+
 %% @private
 -spec grain_key(erleans:grain_ref()) -> {term(), module()}.
+
 grain_key(#{id := Id, implementing_module := Mod}) ->
     {Id, Mod}.
 
-%% @private
--spec get_num_partitions() -> pos_integer().
-get_num_partitions() ->
-    erleans_config:get(pm_partitions, 1).
 
 %% @private  
 -spec get_all_partition_pids() -> [pid()].
+
 get_all_partition_pids() ->
     case gproc_pool:active_workers(erleans_registry_pool) of
         [] ->
@@ -243,12 +262,15 @@ get_all_partition_pids() ->
             [Pid || {_, Pid} <- Workers]
     end.
 
+
 %% @private
 -spec try_all_partitions(fun((pid()) -> continue | {found, term()} | {error, term()})) ->
     {ok, term()} | {error, not_found}.
+
 try_all_partitions(Fun) ->
     Workers = get_all_partition_pids(),
     try_partitions(Fun, Workers).
+
 
 %% @private
 try_partitions(_Fun, []) ->
@@ -269,9 +291,13 @@ try_partitions(Fun, [PartitionPid | Rest]) ->
             try_partitions(Fun, Rest)
     end.
 
+
+
 %% =============================================================================
 %% TEST
 %% =============================================================================
+
+
 
 -ifdef(TEST).
 

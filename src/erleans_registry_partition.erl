@@ -84,6 +84,7 @@ This is stored on `bondy_mst`.
 
 %% BONDY_MST_CRDT CALLBACKS
 -export([broadcast/1]).
+-export([crdt_callback/3]).
 -export([on_merge/1]).
 -export([send/2]).
 -export([sync/1]).
@@ -119,197 +120,357 @@ This is stored on `bondy_mst`.
 -compile({no_auto_import, [demonitor/2]}).
 
 
+
 %% =============================================================================
 %% API
 %% =============================================================================
+
+
 
 ?DOC("""
 Returns the registered name for a partition ID.
 """).
 -spec partition_name(pos_integer()) -> atom().
+
 partition_name(PartitionId) ->
     list_to_atom("erleans_registry_partition_" ++ integer_to_list(PartitionId)).
+
 
 ?DOC("""
 Starts a partition server with given ID and registers it in gproc_pool.
 """).
 -spec start_link(pos_integer(), atom()) -> {ok, pid()} | {error, term()}.
+
 start_link(PartitionId, PoolName) ->
     Name = partition_name(PartitionId),
     partisan_gen_server:start_link({local, Name}, ?MODULE, [PartitionId, PoolName], ?OPTS).
+
 
 ?DOC("""
 Registers a grain in this specific partition.
 """).
 -spec register_name(pid(), erleans:grain_ref()) ->
-    ok | {error, badgrain} | {error, timeout} | {error, {already_in_use, partisan_remote_ref:p()}}.
+    ok
+    | {error, badgrain}
+    | {error, timeout}
+    | {error, {already_in_use, partisan_remote_ref:p()}}.
+
 register_name(PartitionPid, GrainRef) ->
     partisan_gen_server:call(PartitionPid, {register_name, GrainRef}, ?TIMEOUT).
+
 
 ?DOC("""
 Unregisters a grain from this specific partition.
 """).
 -spec unregister_name(pid(), erleans:grain_ref()) -> ok | {error, badgrain}.
+
 unregister_name(PartitionPid, GrainRef) ->
     partisan_gen_server:call(PartitionPid, {unregister_name, GrainRef}).
+
 
 ?DOC("""
 Returns a process reference for GrainRef from this partition.
 """).
 -spec whereis_name(pid(), erleans:grain_ref()) ->
     partisan_remote_ref:p() | undefined.
+
 whereis_name(PartitionPid, GrainRef) ->
     whereis_name(PartitionPid, GrainRef, [safe]).
+
 
 ?DOC("""
 Returns a process reference for GrainRef from this partition with options.
 """).
 -spec whereis_name(pid(), erleans:grain_ref(), [safe | unsafe]) ->
     partisan_remote_ref:p() | undefined.
+
 whereis_name(PartitionPid, GrainRef, Opts) ->
     partisan_gen_server:call(PartitionPid, {whereis_name, GrainRef, Opts}).
+
 
 ?DOC("""
 Lookups all registered grains under name GrainRef in this partition.
 """).
 -spec lookup(pid(), erleans:grain_ref()) -> [partisan_remote_ref:p()].
+
 lookup(PartitionPid, GrainRef) ->
     partisan_gen_server:call(PartitionPid, {lookup, GrainRef}).
+
 
 ?DOC("""
 Returns the grain_ref for a process reference from this partition.
 """).
 -spec grain_ref(pid(), partisan:any_pid()) ->
     {ok, erleans:grain_ref()} | {error, timeout | any()}.
+
 grain_ref(PartitionPid, ProcRef) ->
     partisan_gen_server:call(PartitionPid, {grain_ref, ProcRef}).
+
 
 ?DOC("""
 Returns list of all registry entries from this partition.
 """).
 -spec to_list(pid()) -> [{grain_key(), partisan_remote_ref:p()}].
+
 to_list(PartitionPid) ->
     to_list(PartitionPid, [safe]).
 
 -spec to_list(pid(), [safe | unsafe]) -> [{grain_key(), partisan_remote_ref:p()}].
+
 to_list(PartitionPid, Opts) ->
     partisan_gen_server:call(PartitionPid, {to_list, Opts}).
 
+
 info(PartitionPid) ->
     partisan_gen_server:call(PartitionPid, info).
+
+
 
 %% =============================================================================
 %% BONDY_MST_CRDT CALLBACKS
 %% =============================================================================
 
+
+
+?DOC("""
+CRDT callback router that routes to specific partition by name.
+This function is called by bondy_mst_crdt with callback_mfa pattern.
+The callback_mfa calls this function as: crdt_callback(PartitionName, Function, Args)
+where Args is the list of arguments passed to the callback.
+""").
+%% CRDT callback router - handles callback_mfa pattern correctly
+crdt_callback(PartitionName, Function, Args) ->
+    ?LOG_DEBUG("CRDT callback: partition=~p, function=~p, args=~p", [PartitionName, Function, Args]),
+    
+    case Function of
+        send ->
+            [Peer, Message] = Args,
+            send_to_partition(PartitionName, Peer, Message);
+        broadcast ->
+            [Gossip] = Args,
+            broadcast_gossip(Gossip);
+        on_merge ->
+            [Peer] = Args,
+            on_merge_partition(PartitionName, Peer);
+        _ ->
+            error({unknown_crdt_callback, Function, Args})
+    end.
+
+
 ?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
 Casts message `Message` to this server on node `Peer` using `partisan`.
 """).
-send(Peer, Message) ->
-    %% Send to all partitions since this is CRDT coordination
-    Pids = erleans_pm:get_all_partition_pids(),
-    [partisan_gen_server:cast(Pid, {crdt_message, Message}) || Pid <- Pids],
-    ok.
+send_to_partition(PartitionName, Peer, Message) ->
+    partisan_gen_server:cast({PartitionName, Peer}, {crdt_message, Message}).
+
 
 ?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
-Broadcasts message `Gossip` to peers using Plumtree.
+Broadcasts message `Gossip` to peers using Plumtree (Epidemis broadcast trees).
 """).
-broadcast(Gossip) ->
-    %% For broadcast, we can either:
-    %% 1. Route based on gossip data peer, or
-    %% 2. Broadcast to all partitions
-    %% Let's use all partitions since broadcast should be global
-    Pids = erleans_pm:get_all_partition_pids(),
-    lists:foreach(fun(Pid) ->
-        partisan_gen_server:cast(Pid, {crdt_broadcast, Gossip})
-    end, Pids),
+broadcast_gossip(Gossip) ->
     partisan:broadcast(Gossip, ?MODULE).
+
 
 ?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
 Removes stale entries and duplicates after merge.
 """).
+on_merge_partition(PartitionName, Peer) ->
+    partisan_gen_server:cast(PartitionName, {crdt_on_merge, Peer}).
+
+
+%% Legacy callback functions - kept for backward compatibility
+send(Peer, Message) ->
+    partisan_gen_server:cast({?MODULE, Peer}, {crdt_message, Message}).
+
+broadcast(Gossip) ->
+    partisan:broadcast(Gossip, ?MODULE).
+
 on_merge(Peer) ->
-    %% Notify all partitions about merge completion
-    Pids = erleans_pm:get_all_partition_pids(),
-    [partisan_gen_server:cast(Pid, {crdt_on_merge, Peer}) || Pid <- Pids].
+    partisan_gen_server:cast(?MODULE, {crdt_on_merge, Peer}).
+
+
 
 %% =============================================================================
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
 %% =============================================================================
+
+
 
 ?DOC("""
 Implementation of the `partisan_plumtree_backend` callback.
 Returns the channel to be used when broadcasting.
 """).
 -spec broadcast_channel() -> partisan:channel().
+
 broadcast_channel() ->
     application:get_env(erleans, partisan_broadcast_channel, undefined).
 
+
 ?DOC("""
 Implementation of the `partisan_plumtree_backend` callback.
+Deconstructs a broadcast that is sent using `broadcast/2` returning the message
+id and payload.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
 """).
 -spec broadcast_data(Gossip :: bondy_mst_crdt:gossip()) ->
-    {MessageId :: {bondy_mst_crdt:node_id(), bondy_mst:hash()}, Payload :: bondy_mst_crdt:gossip()}.
+    {
+        MessageId :: {bondy_mst_crdt:node_id(), bondy_mst:hash()},
+        Payload :: bondy_mst_crdt:gossip()
+    }.
+
 broadcast_data(Gossip) ->
     #{from := Peer, root := Root} = bondy_mst_crdt:gossip_data(Gossip),
     {{Peer, Root}, Gossip}.
 
--spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_crdt:gossip()) -> boolean().
-merge(_Id, Gossip) ->
-    %% Merge on all partitions since each has its own CRDT
-    Pids = erleans_pm:get_all_partition_pids(),
-    Results = [partisan_gen_server:call(Pid, {crdt_merge, Gossip}) || Pid <- Pids],
-    %% Return true if any partition handled it successfully
-    lists:any(fun(R) -> R =:= true end, Results).
 
--spec merge(Peer :: node(), Root :: bondy_mst:hash(), Payload :: bondy_mst_crdt:gossip()) -> boolean().
+?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
+Merges a remote copy of an object record sent via broadcast w/ the
+local view for the key contained in the message id. If the remote copy is
+causally older than the current data stored then `false` is returned and no
+updates are merged. Otherwise, the remote copy is merged (possibly
+generating siblings) and `true` is returned.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
+-spec merge(GossipId :: gossip_id(), Payload :: bondy_mst_crdt:gossip()) ->
+    boolean().
+
+merge(_Id, Gossip) ->
+    partisan_gen_server:call(?MODULE, {crdt_merge, Gossip}).
+
+
+?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
+Same as merge/2 but merges the object on `Node'
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
+-spec merge(
+    Peer :: node(),
+    Root :: bondy_mst:hash(),
+    Payload :: bondy_mst_crdt:gossip()) -> boolean().
+
 merge(Peer, _Root, Gossip) ->
     partisan_gen_server:call({?MODULE, Peer}, {crdt_merge, Gossip}).
 
+
+?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
+When a peer broadcasts a message it does it to the nodes in its eager-push set
+only, but also simultaneously sends I_HAVE notifications to nodes in its
+lazy-push set instead of the entire message. This callback is the one that
+Plumtree calls when receiving an I_HAVE message.
+
+The main idea is:
+“I have seen a broadcast message with this root. If you need it, let me know.”
+
+This saves bandwidth, because instead of blindly sending every neighbor the full
+payload, the node sends just the root hash. The lazy neighbors can decide
+whether they need the full message or not.
+
+If function returns `true` then Plumtree will do nothing. However,if it returns
+`false` then Plumtree will `graft` the message from the peer and send it to us.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
 -spec is_stale(gossip_id()) -> boolean().
+
 is_stale({Peer, Root}) ->
-    %% Check staleness across all partitions
-    Pids = erleans_pm:get_all_partition_pids(),
-    [partisan_gen_server:cast(Pid, {crdt_maybe_merge, Peer, Root}) || Pid <- Pids],
+    %% In our case the I_HAVE message is the root of the peer's tree, so we
+    %% always return `true` signaling Plumtree that we do not need the message,
+    %% and we send ourself a message to potentially init a merge with the peer
+    %% i.e. in this case we take the job of synchonising the CRDT in out hands
+    %% instead of relying on Plumtree.
+    ok = partisan_gen_server:cast(?MODULE, {crdt_maybe_merge, Peer, Root}),
     true.
 
--spec graft(gossip_id()) -> stale | {ok, bondy_mst_crdt:gossip()} | {error, term()}.
+
+?DOC("""
+Implementation of the `partisan_plumtree_backend` callback.
+In Plumtree this is used to return the object associated with the given prefixed
+message id if the currently stored version has an equal context. Otherwise
+returning the atom `stale`.
+
+Because it assumes that a grafted context can only be causally older than
+the local view, a `stale` response means there is another message that
+subsumes the grafted one.
+
+> This function is part of the implementation of the
+partisan_plumtree_broadcast_handler behaviour.
+> You should never call it directly.
+""").
+-spec graft(gossip_id()) ->
+    stale | {ok, bondy_mst_crdt:gossip()} | {error, term()}.
+
 graft({_Peer, _Root}) ->
+    %% In our case, the message_id is just the peer's root hash, so in case
+    %% we contain the root we return a Gossip message with our root. Otherwise
+    %% we return 'stale'.
+    %% partisan_gen_server:call(?MODULE, {crdt_graft, Peer, Root}).
     {error, disabled}.
 
+
+?DOC("""
+Calls `sync/1`.
+""").
 -spec exchange(node()) -> {ok, pid()} | {error, term()}.
+
 exchange(Peer) ->
     exchange(Peer, #{}).
 
+
+?DOC("""
+Calls `sync/2`.
+""").
 -spec exchange(node(), map()) -> ok | {error, term()}.
+
 exchange(Peer, Opts) ->
     sync(Peer, Opts).
 
 ?DOC("""
 Triggers a synchronisation exchange with a peer.
+Calls `exchange/2` with an empty map as the second argument.
 """).
+-spec sync(node()) -> {ok, pid()} | {error, term()}.
+
 sync(Peer) ->
     sync(Peer, #{}).
 
+
+?DOC("""
+Triggers a synchronisation exchange with a peer.
+""").
+-spec sync(node(), map()) -> ok | {error, term()}.
+
 sync(Peer, Opts) ->
-    %% Trigger sync on all partitions
-    Pids = erleans_pm:get_all_partition_pids(),
-    Results = [partisan_gen_server:call(Pid, {crdt_trigger, Peer, Opts}) || Pid <- Pids],
-    %% Return the first successful result
-    case lists:dropwhile(fun({error, _}) -> true; (_) -> false end, Results) of
-        [First | _] -> First;
-        [] -> {error, no_partitions_available}
-    end.
+    partisan_gen_server:call(?MODULE, {crdt_trigger, Peer, Opts}).
+
+
 
 %% =============================================================================
 %% PARTISAN_GEN_SERVER BEHAVIOR CALLBACKS
 %% =============================================================================
 
+
+
 -spec init([pos_integer() | atom()]) -> {ok, State :: t()}.
+
 init([PartitionId, PoolName]) ->
+    %% Trap exists otherwise terminate/1 won't be called when shutdown by
+    %% supervisor.
     erlang:process_flag(trap_exit, true),
 
     MonitorTab = ?MONITOR_TAB(PartitionId),
@@ -326,10 +487,12 @@ init([PartitionId, PoolName]) ->
         ]
     ),
 
+    %% We monitor all nodes so that we can cleanup our view of the registry
     partisan:monitor_nodes(true),
 
     {channel, Channel} = lists:keyfind(channel, 1, partisan_gen:get_opts()),
 
+    %% We wrap the tree using the exchange module
     Node = partisan:node(),
     Opts = #{
         hash_algorithm => sha256,
@@ -341,7 +504,9 @@ init([PartitionId, PoolName]) ->
             name => atom_to_binary(partition_name(PartitionId)),
             persistent => true
         },
-        callback_mod => ?MODULE,
+        %% CRDT opts
+        %% Use callback_mfa to route calls to this specific partition instance
+        callback_mfa => {?MODULE, crdt_callback, [partition_name(PartitionId)]},
         max_merges => 1,
         max_merges_per_root => 1,
         max_versions => 10,
@@ -350,9 +515,14 @@ init([PartitionId, PoolName]) ->
         consistency_model => eventual
     },
 
+    %% We create an ets-based MST bound to this process.
+    %% The ets table will be garbage collected if this process terminates.
     CRDT = bondy_mst_crdt:new(Node, Opts),
     Tree = bondy_mst_crdt:tree(CRDT),
 
+    %% ets-based trees support read_concurrency (option store_opts.persistent)
+    %% so we can cache and share it using persistent_term to avoid a call to
+    %% this process.
     ok = persistent_term:put(?PERSISTENT_KEY(PartitionId), Tree),
 
     State = #state{
@@ -373,24 +543,42 @@ init([PartitionId, PoolName]) ->
     
     {ok, State, {continue, monitor_existing}}.
 
+
 handle_continue(monitor_existing, #state{partition_id = PartitionId} = State0) ->
     MonitorTab = ?MONITOR_TAB(PartitionId),
+    %% This prevents any grain to be registered as we are blocking the server
+    %% until we finish.
+    %% We fold the claimed ?MONITOR_TAB table to find any existing
+    %% registrations. In case the table is new, it would be empty. Otherwise,
+    %% we would iterate over registrations that were done by a previous
+    %% instance of this server before it crashed.
+    %% We re-register/monitor alive pids and remove dead ones.
     Fun = fun
         ({Pid, GrainRef, _OldMRef}, Acc0) ->
             case erlang:is_process_alive(Pid) of
                 true ->
+                    %% The process is still alive, but the monitor has died with
+                    %% the previous instance of this gen_server, so we monitor
+                    %% again. We use relaxed mode which allows us to update the
+                    %% existing registration on ?MONITOR_TAB and the MST.
                     {_, Acc} = do_register_name(Acc0, GrainRef, Pid, relaxed),
                     Acc;
                 false ->
+                    %% The process has died, so we unregister. This will also
+                    %% remove the registration from the MST.
                     {_, Acc} = do_unregister_name(Acc0, GrainRef, Pid),
                     Acc
             end
     end,
     State = lists:foldl(Fun, State0, ets:tab2list(MonitorTab)),
+
+    %% We should now have all existing local grains re-registered on this
+    %% server and broadcast messages sent to cluster peers.
     {noreply, State};
 
 handle_continue(_, State) ->
     {noreply, State}.
+
 
 handle_call({register_name, GrainRef}, {Caller, _}, State0) when is_pid(Caller) ->
     case lookup_local_pid(State0#state.partition_id, GrainRef) of
@@ -492,6 +680,15 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     Root0 = bondy_mst_crdt:root(CRDT0),
     CRDT = bondy_mst_crdt:handle(CRDT0, Gossip),
     Root = bondy_mst_crdt:root(CRDT),
+    
+    %% Required by Plumtree.
+    %% Merges a remote copy of an object record sent via broadcast w/ the
+    %% local view for the key contained in the message id. If the remote copy is
+    %% causally older than the current data stored then `false` is returned and
+    %% no updates are merged. Otherwise, the remote copy is merged (possibly
+    %% generating siblings) and `true` is returned.
+    %% Since we will performing a merge if required during
+    %% bondy_mst_crdt:handle/2 we reply `false`.
     Reply = Root =/= Root0,
     {reply, Reply, State#state{crdt = CRDT}};
 
@@ -598,9 +795,12 @@ terminate(_Reason, #state{partition_id = PartitionId} = State) ->
     _ = persistent_term:erase(?PERSISTENT_KEY(PartitionId)),
     ok.
 
+
+
 %% =============================================================================
 %% PRIVATE
 %% =============================================================================
+
 
 
 do_lookup(#state{partition_id = PartitionId, crdt = CRDT}, #{id := _} = GrainRef) ->
@@ -670,7 +870,9 @@ lookup_local_pid(PartitionId, GrainRef) ->
     end.
 
 mst_merge_value(PartitionId, GrainKey, AWSet1, AWSet2) ->
+    %% We merge de CRDTs
     AWSet3 = state_awset:merge(AWSet1, AWSet2),
+    %% We remove local grains that have been deactivated
     AWSet = remove_deactivated(PartitionId, AWSet3),
     ?LOG_DEBUG(#{
         description => "Merged values",
@@ -689,6 +891,8 @@ remove_deactivated(PartitionId, AWSet) ->
             true ?= partisan_remote_ref:is_local(ProcRef),
             Pid ?= partisan_remote_ref:to_pid(ProcRef),
             undefined ?= monitor_lookup(PartitionId, Pid),
+            %% Not monitored so it has been deactivated i.e. the peer node has a
+            %% stale entry. We remove it from the set.
             ?LOG_DEBUG(#{
                 message => "Removing grain from registry",
                 partition_id => PartitionId,
@@ -698,8 +902,10 @@ remove_deactivated(PartitionId, AWSet) ->
             awset_remove(Acc, ProcRef)
         else
             false ->
+                %% Not local, so we ignore it
                 Acc;
             {_Pid, _GrainRef, _Mref} ->
+                %% Monitored, so we ignore it
                 Acc
         end
     end,
@@ -709,13 +915,21 @@ awset_remove(AWSet0, Value) ->
     {ok, AWSet} = state_type:mutate({rmv, Value}, partisan:node(), AWSet0),
     AWSet.
 
+%% This function assumes remove_deactivated/2 was called on AWSet before.
 maybe_deactivate_local_duplicate(_PartitionId, GrainKey, AWSet) ->
     All = sets:to_list(state_awset:query(AWSet)),
     maybe
+        %% Partition based on locality
         {[ProcRef], [_ | _] = Remotes} ?=
             lists:partition(fun partisan_remote_ref:is_local/1, All),
+        %% We have duplicates, so we need to check if our local duplicate should
+        %% belong here.
         false ?= safe_is_location_right(GrainKey, ProcRef),
+        %% The grain should not be here, so we will deactivate but only if
+        %% we can reach any of the remote duplicates
         true ?= lists:any(fun is_reachable/1, Remotes),
+        %% Since at least one remote grain is reachable, we deactivate the
+        %% local one
         deactivate_grain(GrainKey, ProcRef)
     else
         _ ->
@@ -758,6 +972,8 @@ remove_stale(State, Key, AWSet) ->
             true ?= partisan_remote_ref:is_local(ProcRef),
             Pid ?= partisan_remote_ref:to_pid(ProcRef),
             undefined ?= monitor_lookup(Acc#state.partition_id, Pid),
+            %% Not monitored so it has been deactivated i.e. the peer node has a
+            %% stale entry. We remove it from the set.
             ?LOG_DEBUG(#{
                 message => "Removing grain from registry",
                 process_ref => ProcRef,
@@ -887,6 +1103,8 @@ deactivate_grain(GrainKey, ProcRef) ->
                 pid => ProcRef,
                 reason => Reason
             }),
+            %% This is an inconsistency, we need to cleanup.
+            %% We ask the peer to do it, via a private cast (peer can be us)
             partisan_gen_server:cast(
                 {?MODULE, partisan_remote_ref:node(ProcRef)},
                 {force_unregister_name, GrainKey, ProcRef}
@@ -938,6 +1156,10 @@ pick_alive([H | T]) ->
 pick_alive([]) ->
     undefined.
 
+
+%% @private
+%% Returns a new list where all the process references are know to be
+%% reachable. If the remote check fails, it returns false.
 filter_alive(undefined) ->
     [];
 
@@ -989,9 +1211,13 @@ unregister_local(#state{partition_id = PartitionId} = State0, Pid) when is_pid(P
 unregister_local(_, '$end_of_table') ->
     ok.
 
+
+
 %% =============================================================================
 %% TEST
 %% =============================================================================
+
+
 
 -ifdef(TEST).
 
