@@ -127,7 +127,8 @@ Starts a partition server with given ID and registers it in gproc_pool.
 """).
 -spec start_link(pos_integer(), atom()) -> {ok, pid()} | {error, term()}.
 start_link(PartitionId, PoolName) ->
-    partisan_gen_server:start_link(?MODULE, [PartitionId, PoolName], ?OPTS).
+    Name = {?MODULE, PartitionId},
+    partisan_gen_server:start_link({local, Name}, ?MODULE, [PartitionId, PoolName], ?OPTS).
 
 ?DOC("""
 Registers a grain in this specific partition.
