@@ -47,6 +47,7 @@ This is stored on `bondy_mst`.
 -define(TREE(PartitionId), persistent_term:get(?PERSISTENT_KEY(PartitionId))).
 -define(MONITOR_TAB(PartitionId), list_to_atom("erleans_registry_partition_monitor_" ++ integer_to_list(PartitionId))).
 -define(TIMEOUT, 15000).
+-define(CRDT_GC_INTERVAL, erleans_config:get(crdt_gc_interval, undefined)).
 
 %% This server may receive a huge amount of messages.
 %% We make sure that they are stored off heap to avoid excessive GCs.
@@ -59,7 +60,8 @@ This is stored on `bondy_mst`.
     partition_id                ::  pos_integer(),
     crdt                        ::  bondy_mst_crdt:t(),
     partisan_channel            ::  partisan:channel(),
-    initial_sync = false        ::  boolean()
+    initial_sync = false        ::  boolean(),
+    crdt_gc_tref                ::  undefined | reference()
 }).
 
 -type t()                   ::  #state{}.
@@ -629,7 +631,15 @@ handle_continue(monitor_existing, #state{partition_id = PartitionId} = State0) -
                     Acc
             end
     end,
-    State = lists:foldl(Fun, State0, ets:tab2list(MonitorTab)),
+    State1 = lists:foldl(Fun, State0, ets:tab2list(MonitorTab)),
+
+    State = case ?CRDT_GC_INTERVAL of
+        undefined ->
+            State1;
+        Interval ->
+            TRef = erlang:send_after(Interval, self(), {crdt_gc, erlang:monotonic_time()}),
+            State1#state{crdt_gc_tref = TRef}
+    end,
 
     %% We should now have all existing local grains re-registered on this
     %% server and broadcast messages sent to cluster peers.
@@ -832,6 +842,10 @@ handle_cast(_Request, State) ->
 handle_info({'ETS-TRANSFER', _, _, []}, State) ->
     {noreply, State};
 
+handle_info({crdt_gc, Epoch}, State0) ->
+    State = do_gc(State0, Epoch),
+    {noreply, State};
+
 handle_info({nodedown, Node}, State) ->
     CRDT = bondy_mst_crdt:cancel_merge(State#state.crdt, Node),
     {noreply, State#state{crdt = CRDT}};
@@ -871,6 +885,22 @@ terminate(_Reason, #state{partition_id = PartitionId} = State) ->
 %% PRIVATE
 %% =============================================================================
 
+
+
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc It allows to perform gargbage collection on the CRDT.
+%% @param State The current state of the partition.
+%% @param Epoch The current epoch.
+%% @return The new state of the partition after garbage collection.
+%% -----------------------------------------------------------------------------
+-spec do_gc(State :: t(), Epoch :: pos_integer()) -> t().
+
+do_gc(State, Epoch) ->
+    %% Meta = #{name => T#?MODULE.name, freed_count => Num, freed_bytes => Bytes},
+    CRDT = bondy_mst_crdt:gc(State#state.crdt, Epoch),
+    TRef = erlang:send_after(?CRDT_GC_INTERVAL, self(), {crdt_gc, erlang:monotonic_time()}),
+    State#state{crdt = CRDT, crdt_gc_tref = TRef}.
 
 
 do_lookup(#state{partition_id = PartitionId, crdt = CRDT}, #{id := _} = GrainRef) ->
@@ -1116,6 +1146,18 @@ do_unregister_name_by_key(#state{partition_id = PartitionId} = State0, GrainKey,
     State = remove(State0, GrainKey, Value),
     {ok, State}.
 
+%% -----------------------------------------------------------------------------
+%% @private
+%% @doc
+%% Converts a grain reference to a grain key.
+%% The grain key is a tuple of the grain id and the implementing module.
+%% This is used to store the grain in the registry and the CRDT.
+%% @param GrainRef The grain reference to convert.
+%% @return The grain key as a tuple {Id, ImplementingModule}.
+%% -----------------------------------------------------------------------------
+-spec grain_key(GrainRef :: #{id := pos_integer(), implementing_module := atom()}) ->
+    grain_key().
+
 grain_key(#{id := Id, implementing_module := Mod}) ->
     {Id, Mod}.
 
@@ -1175,10 +1217,23 @@ deactivate_grain(GrainKey, ProcRef) ->
             }),
             %% This is an inconsistency, we need to cleanup.
             %% We ask the peer to do it, via a private cast (peer can be us)
-            partisan_gen_server:cast(
-                {?MODULE, partisan_remote_ref:node(ProcRef)},
-                {force_unregister_name, GrainKey, ProcRef}
-            );
+            case GrainKey of
+                {Id, Mod} -> 
+                    GrainRef = #{id => Id, implementing_module => Mod},
+                    PartitionPid = erleans_pm:select_partition(GrainRef),
+                    {registered_name, PartitionName} = erlang:process_info(PartitionPid, registered_name),
+                    partisan_gen_server:cast(
+                        {PartitionName, partisan_remote_ref:node(ProcRef)},
+                        {force_unregister_name, GrainKey, ProcRef}
+                    );
+                _ ->
+                    ?LOG_ERROR(#{
+                        description => "Invalid grain key format",
+                        grain => GrainKey,
+                        pid => ProcRef
+                    }),
+                    ok
+            end;
         {error, Reason} ->
             ?LOG_ERROR(#{
                 description => "Failed to deactivate duplicate",
@@ -1282,8 +1337,14 @@ unregister_local(_, '$end_of_table') ->
     ok.
 
 
+%% -------------------------------------------------------------------------------
 %% @private
-%% Selects the appropriate partition PID for a gossip message based on the grain key
+%% @doc Selects the appropriate partition PID for a gossip message
+%% based on the grain key
+%% @end
+%% --------------------------------------------------------------------------------
+-spec select_partition_for_gossip(Gossip :: term()) -> pid().
+
 select_partition_for_gossip(Gossip) ->
     #{key := Key} = bondy_mst_crdt:gossip_data(Gossip),
     case Key of
