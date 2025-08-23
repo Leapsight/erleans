@@ -86,9 +86,11 @@ This is stored on `bondy_mst`.
 
 %% BONDY_MST_CRDT CALLBACKS
 -export([broadcast/1]).
--export([crdt_callback/3]).
+-export([broadcast/2]).
 -export([on_merge/1]).
+-export([on_merge/2]).
 -export([send/2]).
+-export([send/3]).
 -export([sync/1]).
 
 %% PARTISAN_PLUMTREE_BROADCAST_HANDLER CALLBACKS
@@ -235,68 +237,44 @@ info(PartitionPid) ->
 
 
 ?DOC("""
-CRDT callback router that routes to specific partition by name.
-This function is called by bondy_mst_crdt with callback_mfa pattern.
-The callback_mfa calls this function as: crdt_callback(PartitionName, Function, Args)
-where Args is the list of arguments passed to the callback.
-""").
-%% CRDT callback router - handles callback_mfa pattern correctly
-crdt_callback(PartitionName, Function, Args) ->
-    ?LOG_DEBUG(#{
-        message => "CRDT callback",
-        partition => PartitionName,
-        function => Function,
-        args => Args
-    }),
-
-    case Function of
-        send ->
-            [Peer, Message] = Args,
-            send_to_partition(PartitionName, Peer, Message);
-        broadcast ->
-            [Gossip] = Args,
-            broadcast_gossip(Gossip);
-        on_merge ->
-            [Peer] = Args,
-            on_merge_partition(PartitionName, Peer);
-        _ ->
-            error({unknown_crdt_callback, Function, Args})
-    end.
-
-
-?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
 Casts message `Message` to this server on node `Peer` using `partisan`.
+The partition name is passed as the first argument from callback_args.
 """).
-send_to_partition(PartitionName, Peer, Message) ->
+send(PartitionName, Peer, Message) ->
     partisan_gen_server:cast({PartitionName, Peer}, {crdt_message, Message}).
 
 
 ?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
 Broadcasts message `Gossip` to peers using Plumtree (Epidemis broadcast trees).
+The partition name is passed as the first argument from callback_args.
 """).
-broadcast_gossip(Gossip) ->
+broadcast(_PartitionName, Gossip) ->
     partisan:broadcast(Gossip, ?MODULE).
 
 
 ?DOC("""
 Implementation of the `bondy_mst_crdt` callback.
 Removes stale entries and duplicates after merge.
+The partition name is passed as the first argument from callback_args.
 """).
-on_merge_partition(PartitionName, Peer) ->
+on_merge(PartitionName, Peer) ->
     partisan_gen_server:cast(PartitionName, {crdt_on_merge, Peer}).
 
 
-%% Legacy callback functions - kept for backward compatibility
-send(Peer, Message) ->
-    partisan_gen_server:cast({?MODULE, Peer}, {crdt_message, Message}).
+%% Legacy callback functions - required for behavior completeness but not used with callback_args
+send(_Peer, _Message) ->
+    %% Not called when using callback_args, but required by behavior
+    ok.
 
-broadcast(Gossip) ->
-    partisan:broadcast(Gossip, ?MODULE).
+broadcast(_Gossip) ->
+    %% Not called when using callback_args, but required by behavior
+    ok.
 
-on_merge(Peer) ->
-    partisan_gen_server:cast(?MODULE, {crdt_on_merge, Peer}).
+on_merge(_Peer) ->
+    %% Not called when using callback_args, but required by behavior
+    ok.
 
 
 
@@ -546,6 +524,7 @@ init([PartitionId, PoolName]) ->
 
     %% We wrap the tree using the exchange module
     Node = partisan:node(),
+    PartitionName = partition_name(PartitionId),
     Opts = #{
         hash_algorithm => sha256,
         merger => fun(GrainKey, AWSet1, AWSet2) -> 
@@ -553,12 +532,13 @@ init([PartitionId, PoolName]) ->
         end,
         store => bondy_mst_ets_store,
         store_opts => #{
-            name => atom_to_binary(partition_name(PartitionId)),
+            name => atom_to_binary(PartitionName),
             persistent => true
         },
         %% CRDT opts
-        %% Use callback_mfa to route calls to this specific partition instance
-        callback_mfa => {?MODULE, crdt_callback, [partition_name(PartitionId)]},
+        %% Use callback_mod and callback_args to route calls to this specific partition
+        callback_mod => ?MODULE,
+        callback_args => [PartitionName],
         max_merges => 1,
         max_merges_per_root => 1,
         max_versions => 10,
