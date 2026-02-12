@@ -475,7 +475,7 @@ sync(Peer, Opts) ->
     Workers = erleans_pm:get_all_partition_pids(),
     [partisan_gen_server:cast(Pid, {crdt_trigger, Peer, Opts}) || Pid <- Workers],
     ok.
-    
+
     % Results = [partisan_gen_server:call(Pid, {crdt_trigger, Peer, Opts}) || Pid <- Workers],
     % %% Return ok if any partition succeeded, otherwise return the first error
     % case lists:any(fun(Result) -> Result =:= ok end, Results) of
@@ -741,9 +741,9 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     Reply = Root =/= Root0,
     {reply, Reply, State#state{crdt = CRDT}};
 
-handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
-    Reply = bondy_mst_crdt:trigger(State#state.crdt, Peer),
-    {reply, Reply, State};
+% handle_call({crdt_trigger, Peer, _Opts}, _From, State) ->
+%     Reply = bondy_mst_crdt:trigger(State#state.crdt, Peer),
+%     {reply, Reply, State};
 
 handle_call(info, _From, #state{partition_id = PartitionId, crdt = CRDT} = State) ->
     MonitorTab = ?MONITOR_TAB(PartitionId),
@@ -814,6 +814,10 @@ handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
         false ->
             {noreply, State0}
     end;
+
+handle_cast({crdt_trigger, Peer, _Opts}, State) ->
+    _ = bondy_mst_crdt:trigger(State#state.crdt, Peer),
+    {noreply, State};
 
 handle_cast(_Request, State) ->
     {noreply, State}.
