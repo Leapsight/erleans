@@ -802,7 +802,7 @@ handle_cast({crdt_on_merge, _Peer}, #state{initial_sync = true} = State) ->
     {noreply, State};
 
 handle_cast({crdt_message, Msg}, State) ->
-    logger:info("Partition ~p: Received CRDT message from peer", [State#state.partition_id]),
+    logger:debug("Partition ~p: Received CRDT message from peer", [State#state.partition_id]),
     CRDT = bondy_mst_crdt:handle(State#state.crdt, Msg),
     {noreply, State#state{crdt = CRDT}};
 
@@ -823,13 +823,13 @@ handle_cast({crdt_trigger, Peer, _Opts}, State) ->
     %% Spawn off-heap to avoid blocking the registry partition
     spawn(fun() ->
         try
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => "Starting async sync",
                 partition => PartitionId,
                 peer => Peer
             }),
             bondy_mst_crdt:trigger(Crdt, Peer),
-            ?LOG_INFO(#{
+            ?LOG_DEBUG(#{
                 message => "Finished async sync",
                 partition => PartitionId,
                 peer => Peer
