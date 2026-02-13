@@ -819,15 +819,31 @@ handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
 handle_cast({crdt_trigger, Peer, _Opts}, State) ->
     Crdt = State#state.crdt,
     PartitionId = State#state.partition_id,
+
+    %% Spawn off-heap to avoid blocking the registry partition
     spawn(fun() ->
         try
-            logger:info("Partition ~p: Starting async sync with ~p", [PartitionId, Peer]),
+            ?LOG_INFO(#{
+                message => "Starting async sync",
+                partition => PartitionId,
+                peer => Peer
+            }),
             bondy_mst_crdt:trigger(Crdt, Peer),
-            logger:info("Partition ~p: Finished async sync with ~p", [PartitionId, Peer])
+            ?LOG_INFO(#{
+                message => "Finished async sync",
+                partition => PartitionId,
+                peer => Peer
+            })
         catch
             Class:Reason:Stack ->
-                logger:error("Partition ~p: CRDT async trigger failed: ~p:~p ~p", 
-                             [PartitionId, Class, Reason, Stack])
+                ?LOG_ERROR(#{
+                    message => "Async sync failed",
+                    partition => PartitionId,
+                    peer => Peer,
+                    class => Class,
+                    reason => Reason,
+                    stack => Stack
+                })
         end
     end),
     {noreply, State};
@@ -903,8 +919,8 @@ do_gc(State, Epoch) ->
 do_lookup(#state{partition_id = PartitionId, crdt = CRDT}, #{id := _} = GrainRef) ->
     do_lookup(#state{partition_id = PartitionId, crdt = CRDT}, grain_key(GrainRef));
 
-do_lookup(#state{partition_id = PartitionId}, {_, _} = GrainKey) ->
-    Tree = ?TREE(PartitionId),
+do_lookup(#state{crdt = CRDT}, {_, _} = GrainKey) ->
+    Tree = bondy_mst_crdt:tree(CRDT),
     case bondy_mst:get(Tree, GrainKey) of
         undefined ->
             [];
