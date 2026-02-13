@@ -802,6 +802,7 @@ handle_cast({crdt_on_merge, _Peer}, #state{initial_sync = true} = State) ->
     {noreply, State};
 
 handle_cast({crdt_message, Msg}, State) ->
+    logger:info("Partition ~p: Received CRDT message from peer", [State#state.partition_id]),
     CRDT = bondy_mst_crdt:handle(State#state.crdt, Msg),
     {noreply, State#state{crdt = CRDT}};
 
@@ -816,7 +817,19 @@ handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
     end;
 
 handle_cast({crdt_trigger, Peer, _Opts}, State) ->
-    _ = bondy_mst_crdt:trigger(State#state.crdt, Peer),
+    Crdt = State#state.crdt,
+    PartitionId = State#state.partition_id,
+    spawn(fun() ->
+        try
+            logger:info("Partition ~p: Starting async sync with ~p", [PartitionId, Peer]),
+            bondy_mst_crdt:trigger(Crdt, Peer),
+            logger:info("Partition ~p: Finished async sync with ~p", [PartitionId, Peer])
+        catch
+            Class:Reason:Stack ->
+                logger:error("Partition ~p: CRDT async trigger failed: ~p:~p ~p", 
+                             [PartitionId, Class, Reason, Stack])
+        end
+    end),
     {noreply, State};
 
 handle_cast(_Request, State) ->
