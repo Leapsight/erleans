@@ -1079,7 +1079,8 @@ maybe_deactivate_local_duplicates(#state{crdt = CRDT, partition_id = PartitionId
 				maybe_deactivate_local_duplicate(PartitionId, Key, AWSet),
 				%% Yield to the scheduler after each duplicate check to prevent
 				%% CPU starvation during massive split-brain resolutions.
-				erlang:yield()
+				erlang:yield(),
+                ok
 			end,
 			bondy_mst:foreach(Tree, Fun)
 		catch
