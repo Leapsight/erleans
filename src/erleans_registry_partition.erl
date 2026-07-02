@@ -61,7 +61,8 @@ This is stored on `bondy_mst`.
     crdt                        ::  bondy_mst_crdt:t(),
     partisan_channel            ::  partisan:channel(),
     initial_sync = false        ::  boolean(),
-    crdt_gc_tref                ::  undefined | reference()
+    crdt_gc_tref                ::  undefined | reference(),
+    sync_workers = #{}          :: #{node() => reference()}
 }).
 
 -type t()                   ::  #state{}.
@@ -357,7 +358,7 @@ merge(Peer, _Root, Gossip) ->
             catch
                 _:_ -> false  % Return false if the call fails
             end;
-        undefined -> 
+        undefined ->
             false  % Return false if partition not registered
     end.
 
@@ -391,11 +392,11 @@ is_stale({_Peer, _Root}) ->
     %% and we send ourself a message to potentially init a merge with the peer
     %% i.e. in this case we take the job of synchonising the CRDT in out hands
     %% instead of relying on Plumtree.
-    %% 
+    %%
     %% Since we don't have gossip context here, we broadcast to all partitions
     %% Each partition will check if it's stale for this peer/root combination
-    
-    
+
+
     %% TODO: it could be wrong!!!!
     %% Option 1: Route to All Partitions (Current - but inefficient)
     %% Option 2: Always Return true (Skip Plumtree optimization)
@@ -480,7 +481,7 @@ sync(Peer, Opts) ->
     % %% Return ok if any partition succeeded, otherwise return the first error
     % case lists:any(fun(Result) -> Result =:= ok end, Results) of
     %     true -> ok;
-    %     false -> 
+    %     false ->
     %         case lists:keyfind(error, 1, Results) of
     %             false -> ok;
     %             Error -> Error
@@ -527,8 +528,8 @@ init([PartitionId, PoolName]) ->
     PartitionName = partition_name(PartitionId),
     Opts = #{
         hash_algorithm => sha256,
-        merger => fun(GrainKey, AWSet1, AWSet2) -> 
-            mst_merge_value(PartitionId, GrainKey, AWSet1, AWSet2) 
+        merger => fun(GrainKey, AWSet1, AWSet2) ->
+            mst_merge_value(PartitionId, GrainKey, AWSet1, AWSet2)
         end,
         store => bondy_mst_ets_store,
         store_opts => #{
@@ -560,10 +561,11 @@ init([PartitionId, PoolName]) ->
     State = #state{
         partition_id = PartitionId,
         crdt = CRDT,
-        partisan_channel = Channel
+        partisan_channel = Channel,
+        sync_workers = #{}
     },
-    
-    
+
+
     %% Connect to gproc_pool immediately
     case gproc_pool:connect_worker(PoolName, {partition, PartitionId}) of
         true ->
@@ -581,7 +583,7 @@ init([PartitionId, PoolName]) ->
             }),
             error({pool_connection_failed, Error})
     end,
-    
+
     {ok, State, {continue, monitor_existing}}.
 
 
@@ -729,7 +731,7 @@ handle_call({crdt_merge, Gossip}, _From, State) ->
     Root0 = bondy_mst_crdt:root(CRDT0),
     CRDT = bondy_mst_crdt:handle(CRDT0, Gossip),
     Root = bondy_mst_crdt:root(CRDT),
-    
+
     %% Required by Plumtree.
     %% Merges a remote copy of an object record sent via broadcast w/ the
     %% local view for the key contained in the message id. If the remote copy is
@@ -817,72 +819,89 @@ handle_cast({force_unregister_name, GrainKey, ProcRef}, State0) ->
     end;
 
 handle_cast({crdt_trigger, Peer, _Opts}, State) ->
-    Crdt = State#state.crdt,
-    PartitionId = State#state.partition_id,
+    ActiveWorkers = State#state.sync_workers,
 
-    %% Spawn off-heap to avoid blocking the registry partition
-    spawn(fun() ->
-        try
-            ?LOG_DEBUG(#{
-                message => "Starting async sync",
-                partition => PartitionId,
-                peer => Peer
-            }),
-            bondy_mst_crdt:trigger(Crdt, Peer),
-            ?LOG_DEBUG(#{
-                message => "Finished async sync",
-                partition => PartitionId,
-                peer => Peer
-            })
-        catch
-            Class:Reason:Stack ->
-                ?LOG_ERROR(#{
-                    message => "Async sync failed",
-                    partition => PartitionId,
-                    peer => Peer,
-                    class => Class,
-                    reason => Reason,
-                    stack => Stack
-                })
-        end
-    end),
-    {noreply, State};
+    %% Check if a sync is already actively running for this Peer
+    case maps:is_key(Peer, ActiveWorkers) of
+        true ->
+            %% A worker is already processing the CRDT for this peer.
+            %% Drop the redundant trigger to save memory.
+            {noreply, State};
+
+        false ->
+            Crdt = State#state.crdt,
+            PartitionId = State#state.partition_id,
+
+            {_Pid, MonitorRef} = erlang:spawn_monitor(
+                fun() ->
+                    try
+                        bondy_mst_crdt:trigger(Crdt, Peer)
+                    catch
+                        Class:Reason:_Stack ->
+                            ?LOG_ERROR(#{
+                                message => "Async sync failed",
+                                partition => PartitionId,
+                                peer => Peer,
+                                class => Class,
+                                reason => Reason
+                            })
+                    end
+                end
+            ),
+
+            NewWorkers = ActiveWorkers#{Peer => MonitorRef},
+            {noreply, State#state{sync_workers = NewWorkers}}
+    end;
 
 handle_cast(_Request, State) ->
     {noreply, State}.
 
 -spec handle_info(Message :: term(), State :: t()) -> {noreply, NewState :: t()}.
 handle_info({'ETS-TRANSFER', _, _, []}, State) ->
-    {noreply, State};
+	{noreply, State};
 
 handle_info({crdt_gc, Epoch}, State0) ->
-    State = do_gc(State0, Epoch),
-    {noreply, State};
+	State = do_gc(State0, Epoch),
+	{noreply, State};
 
 handle_info({nodedown, Node}, State) ->
-    CRDT = bondy_mst_crdt:cancel_merge(State#state.crdt, Node),
-    {noreply, State#state{crdt = CRDT}};
+	CRDT = bondy_mst_crdt:cancel_merge(State#state.crdt, Node),
+	{noreply, State#state{crdt = CRDT}};
 
 handle_info({nodeup, _Node}, State) ->
-    {noreply, State};
+	{noreply, State};
 
-handle_info({'DOWN', MRef, process, Pid, _Info}, State0) when is_pid(Pid) ->
-    ?LOG_INFO(#{message => "Grain down", pid => Pid, mref => MRef}),
-    {_, State} = do_unregister_process(State0, Pid),
-    {noreply, State};
+handle_info({'DOWN', MRef, process, Pid, _Reason}, State) when is_pid(Pid) ->
+	ActiveWorkers = State#state.sync_workers,
+
+	%% Determine if the exiting process was one of our sync workers
+	%% by searching our map for the MRef.
+	MatchingPeers = [Peer || Peer := Ref <- ActiveWorkers, Ref =:= MRef],
+
+	case MatchingPeers of
+		[Peer] ->
+			%% It was a sync worker. Remove the lock.
+			NewWorkers = maps:remove(Peer, ActiveWorkers),
+			{noreply, State#state{sync_workers = NewWorkers}};
+		[] ->
+			%% It was not a sync worker; it must be a registered grain.
+			?LOG_INFO(#{message => "Grain down", pid => Pid, mref => MRef}),
+			{_, NewState} = do_unregister_process(State, Pid),
+			{noreply, NewState}
+	end;
 
 handle_info(Event, State) ->
-    ?LOG_INFO(#{message => "Received unknown event", event => Event}),
-    {noreply, State}.
+	?LOG_INFO(#{message => "Received unknown event", event => Event}),
+	{noreply, State}.
 
 -spec terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()), State :: t()) -> ok.
 terminate(_Reason, #state{partition_id = PartitionId} = State) ->
     %% Only stop monitoring if we're the last partition
     try
         case length(erleans_pm:get_all_partition_pids()) =< 1 of
-            true -> 
+            true ->
                 partisan:monitor_nodes(false);
-            false -> 
+            false ->
                 ok  % Other partitions still need monitoring
         end
     catch
@@ -1051,12 +1070,12 @@ maybe_deactivate_local_duplicate(_PartitionId, GrainKey, AWSet) ->
 
 maybe_deactivate_local_duplicates(#state{crdt = CRDT, partition_id = PartitionId}) ->
 	Tree = bondy_mst_crdt:tree(CRDT),
-	
+
 	%% Delegate the O(N) traversal to an isolated, off-heap worker process.
 	%% This prevents the partition's mailbox from blocking during large merges.
 	erlang:spawn_opt(fun() ->
 		try
-			Fun = fun({Key, AWSet}) -> 
+			Fun = fun({Key, AWSet}) ->
 				maybe_deactivate_local_duplicate(PartitionId, Key, AWSet),
 				%% Yield to the scheduler after each duplicate check to prevent
 				%% CPU starvation during massive split-brain resolutions.
@@ -1253,7 +1272,7 @@ deactivate_grain(GrainKey, ProcRef) ->
             %% This is an inconsistency, we need to cleanup.
             %% We ask the peer to do it, via a private cast (peer can be us)
             case GrainKey of
-                {Id, Mod} -> 
+                {Id, Mod} ->
                     GrainRef = #{id => Id, implementing_module => Mod},
                     PartitionPid = erleans_pm:select_partition(GrainRef),
                     {registered_name, PartitionName} = erlang:process_info(PartitionPid, registered_name),
