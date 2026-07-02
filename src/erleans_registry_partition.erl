@@ -1050,9 +1050,31 @@ maybe_deactivate_local_duplicate(_PartitionId, GrainKey, AWSet) ->
     end.
 
 maybe_deactivate_local_duplicates(#state{crdt = CRDT, partition_id = PartitionId}) ->
-    Tree = bondy_mst_crdt:tree(CRDT),
-    Fun = fun({Key, AWSet}) -> maybe_deactivate_local_duplicate(PartitionId, Key, AWSet) end,
-    bondy_mst:foreach(Tree, Fun).
+	Tree = bondy_mst_crdt:tree(CRDT),
+	
+	%% Delegate the O(N) traversal to an isolated, off-heap worker process.
+	%% This prevents the partition's mailbox from blocking during large merges.
+	erlang:spawn_opt(fun() ->
+		try
+			Fun = fun({Key, AWSet}) -> 
+				maybe_deactivate_local_duplicate(PartitionId, Key, AWSet),
+				%% Yield to the scheduler after each duplicate check to prevent
+				%% CPU starvation during massive split-brain resolutions.
+				erlang:yield()
+			end,
+			bondy_mst:foreach(Tree, Fun)
+		catch
+			Class:Reason:Stacktrace ->
+				?LOG_ERROR(#{
+					message => "Background deactivation worker crashed",
+					partition_id => PartitionId,
+					class => Class,
+					reason => Reason,
+					stacktrace => Stacktrace
+				})
+		end
+	end, [{message_queue_data, off_heap}]),
+	ok.
 
 safe_is_location_right({_, Mod}, LocalPRef) ->
     try
