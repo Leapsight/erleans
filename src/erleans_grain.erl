@@ -31,22 +31,25 @@
 
 -behaviour(partisan_gen_statem).
 
+-export([
+    start_link/1,
+    grain_ref/1,
+    deactivate/1,
+    call/2,
+    call/3,
+    cast/2
+]).
 
--export([start_link/1,
-         grain_ref/1,
-         deactivate/1,
-         call/2,
-         call/3,
-         cast/2]).
-
--export([init/1,
-         init/2,
-         callback_mode/0,
-         active/3,
-         deactivating/3,
-         terminate/3,
-         is_location_right/2,
-         code_change/4]).
+-export([
+    init/1,
+    init/2,
+    callback_mode/0,
+    active/3,
+    deactivating/3,
+    terminate/3,
+    is_location_right/2,
+    code_change/4
+]).
 
 -include("erleans.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -60,19 +63,15 @@
 
 -type from() :: {pid(), term()}.
 
--type action() :: {reply, From :: from(), Reply :: term()} |
-                  {cast, Msg :: term()} |
-                  {info, Msg :: term()} |
-                  save_state.
-
-
-
+-type action() ::
+    {reply, From :: from(), Reply :: term()}
+    | {cast, Msg :: term()}
+    | {info, Msg :: term()}
+    | save_state.
 
 %% =============================================================================
 %% BEHAVIOUR CALLBACKS
 %% =============================================================================
-
-
 
 -callback provider() -> module().
 
@@ -82,13 +81,15 @@
 
 -callback state(Id :: term()) -> term().
 
--callback activate(Ref :: erleans:grain_ref(), Arg :: term()) -> {ok, Data :: cb_state(), opts()} |
-                                                                 {error, Reason :: term()}.
+-callback activate(Ref :: erleans:grain_ref(), Arg :: term()) ->
+    {ok, Data :: cb_state(), opts()}
+    | {error, Reason :: term()}.
 
--type callback_result() :: {ok, CbData :: cb_state()} |
-                           {ok, CbData :: cb_state(), [action()]} |
-                           {deactivate, CbData :: cb_state()} |
-                           {deactivate, CbData :: cb_state(), [action()]}.
+-type callback_result() ::
+    {ok, CbData :: cb_state()}
+    | {ok, CbData :: cb_state(), [action()]}
+    | {deactivate, CbData :: cb_state()}
+    | {deactivate, CbData :: cb_state(), [action()]}.
 
 -callback handle_call(Msg :: term(), From :: from(), CbData :: cb_state()) -> callback_result().
 
@@ -96,44 +97,46 @@
 
 -callback handle_info(Msg :: term(), CbData :: cb_state()) -> callback_result().
 
-
 -callback is_location_right(Pid :: pid()) -> boolean().
 
--callback deactivate(CbData :: cb_state()) -> {ok, CbData :: cb_state()} |
-                                              {save_state, CbData :: cb_state()}.
+-callback deactivate(CbData :: cb_state()) ->
+    {ok, CbData :: cb_state()}
+    | {save_state, CbData :: cb_state()}.
 
--optional_callbacks([activate/2,
-                     provider/0,
-                     placement/0,
-                     state/1,
-                     handle_info/2,
-                     is_location_right/1,
-                     deactivate/1]).
+-optional_callbacks([
+    activate/2,
+    provider/0,
+    placement/0,
+    state/1,
+    handle_info/2,
+    is_location_right/1,
+    deactivate/1
+]).
 
--record(data,
-       { cb_module            :: module(),
-         cb_state             :: cb_state(),
+-record(data, {
+    cb_module :: module(),
+    cb_state :: cb_state(),
 
-         id                   :: term(),
-         etag                 :: integer(),
-         provider             :: term(),
-         ref                  :: erleans:grain_ref(),
-         create_time          :: non_neg_integer(),
-         deactivate_after     :: non_neg_integer() | infinity
-       }).
+    id :: term(),
+    etag :: integer(),
+    provider :: term(),
+    ref :: erleans:grain_ref(),
+    create_time :: non_neg_integer(),
+    deactivate_after :: non_neg_integer() | infinity
+}).
 
--type opts() :: #{ref    => binary(),
-                  etag   => integer(),
+-type opts() :: #{
+    ref => binary(),
+    etag => integer(),
 
-                  deactivate_after => non_neg_integer() | infinity
-                 }.
+    deactivate_after => non_neg_integer() | infinity
+}.
 
 -export_types([opts/0]).
 
 -spec start_link(GrainRef :: erleans:grain_ref()) -> {ok, pid() | undefined} | {error, any()}.
 start_link(GrainRef) ->
     partisan_proc_lib:start_link(?MODULE, init, [self(), GrainRef]).
-
 
 %% -----------------------------------------------------------------------------
 %% @doc
@@ -143,7 +146,6 @@ start_link(GrainRef) ->
 
 grain_ref(Pid) when is_pid(Pid) ->
     grain_ref(partisan_remote_ref:from_term(Pid));
-
 grain_ref(Process) ->
     partisan:is_pid(Process) orelse error({badarg, [Process]}),
 
@@ -153,10 +155,9 @@ grain_ref(Process) ->
         )
     catch
         exit:{bad_etag, _} ->
-             ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
-             {exit, saved_etag_changed}
+            ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
+            {exit, saved_etag_changed}
     end.
-
 
 %% -----------------------------------------------------------------------------
 %% @doc Requests the deactivation (and termination) of the grain associated with
@@ -175,20 +176,16 @@ deactivate(#{id := _} = GrainRef) ->
         PidRef ->
             deactivate(PidRef)
     end;
-
 deactivate(PidRef) ->
     try
         Event = {?current_span_ctx, req_type(), deactivate},
         partisan_gen_statem:cast(PidRef, Event)
-
     catch
         exit:{noproc, notfound} ->
             {error, not_found};
-
         exit:Reason ->
             {error, Reason}
     end.
-
 
 %% -----------------------------------------------------------------------------
 %% @doc
@@ -200,25 +197,28 @@ deactivate(PidRef) ->
 call(GrainRef, Request) ->
     call(GrainRef, Request, ?DEFAULT_TIMEOUT).
 
--spec call(GrainRef :: erleans:grain_ref(), Request :: term(), non_neg_integer() | infinity) -> Reply :: term().
+-spec call(GrainRef :: erleans:grain_ref(), Request :: term(), non_neg_integer() | infinity) ->
+    Reply :: term().
 call(GrainRef, Request, Timeout) ->
     ReqType = req_type(),
     do_for_ref(GrainRef, fun(_, Pid) ->
-         try
-             partisan_gen_statem:call(
+        try
+            partisan_gen_statem:call(
                 Pid, {?current_span_ctx, ReqType, Request}, Timeout
             )
-         catch
-             exit:{bad_etag, _} ->
-                 ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
-                 {exit, saved_etag_changed}
-         end
- end).
+        catch
+            exit:{bad_etag, _} ->
+                ?LOG_ERROR("at=grain_exit reason=bad_etag", []),
+                {exit, saved_etag_changed}
+        end
+    end).
 
 -spec cast(GrainRef :: erleans:grain_ref(), Request :: term()) -> Reply :: term().
 cast(GrainRef, Request) ->
     ReqType = req_type(),
-    do_for_ref(GrainRef, fun(_, Pid) -> partisan_gen_statem:cast(Pid, {?current_span_ctx, ReqType, Request}) end).
+    do_for_ref(GrainRef, fun(_, Pid) ->
+        partisan_gen_statem:cast(Pid, {?current_span_ctx, ReqType, Request})
+    end).
 
 req_type() ->
     case get(req_type) of
@@ -230,8 +230,7 @@ req_type() ->
 
 do_for_ref(GrainPid, Fun) when is_pid(GrainPid) ->
     Fun(noname, GrainPid);
-
-do_for_ref(GrainRef=#{placement := {stateless, _N}}, Fun) ->
+do_for_ref(GrainRef = #{placement := {stateless, _N}}, Fun) ->
     case erleans_stateless:pick_grain(GrainRef, Fun) of
         {ok, Res} ->
             Res;
@@ -262,12 +261,14 @@ do_for_ref(GrainRef, Fun) ->
         end
     catch
         %% Retry only if the process deactivated
-        exit:{Reason, _} when Reason =:= {shutdown, deactivated}
-                            ; Reason =:= normal ->
+        exit:{Reason, _} when
+            Reason =:= {shutdown, deactivated};
+            Reason =:= normal
+        ->
             do_for_ref(GrainRef, Fun)
     end.
 
-activate_grain(GrainRef=#{placement := Placement}) ->
+activate_grain(GrainRef = #{placement := Placement}) ->
     case Placement of
         {stateless, N} ->
             activate_stateless(GrainRef, N);
@@ -283,17 +284,15 @@ activate_grain(GrainRef=#{placement := Placement}) ->
         %%  load placement
     end.
 
-
 -spec is_location_right(
-    erlans:grain_ref() | module(), ProcessRef :: partisan_remote_ref:p()) ->
+    erlans:grain_ref() | module(), ProcessRef :: partisan_remote_ref:p()
+) ->
     boolean().
 
 is_location_right(#{implementing_module := Mod}, ProcessRef) ->
     is_location_right(Mod, ProcessRef);
-
 is_location_right(Mod, ProcessRef) ->
     erleans_utils:fun_or_default(Mod, is_location_right, 1, [ProcessRef], true).
-
 
 %% Stateless are always activated on the local node if <N exist already on the node
 activate_stateless(GrainRef, _N) ->
@@ -313,15 +312,12 @@ activate_callback(GrainRef, Mod, Fun) ->
     Node = erleans_utils:fun_or_default(Mod, Fun, 1, [GrainRef], undefined),
     activate_at([Node], GrainRef).
 
-
 %% @private
 activate_at([], GrainRef) ->
     activate_local(GrainRef);
-
-activate_at([undefined|T], GrainRef) ->
+activate_at([undefined | T], GrainRef) ->
     activate_at(T, GrainRef);
-
-activate_at([H|T], GrainRef) ->
+activate_at([H | T], GrainRef) ->
     try erleans_grain_sup:start_child(H, GrainRef) of
         {ok, _} = OK ->
             OK
@@ -330,11 +326,9 @@ activate_at([H|T], GrainRef) ->
             activate_at(T, GrainRef)
     end.
 
-
 %% not used but required by the behaviour definition
 init(Args) ->
     erlang:error(not_implemented, [Args]).
-
 
 init(Parent, GrainRef) ->
     put(grain_ref, GrainRef),
@@ -365,13 +359,13 @@ init_(Parent, GrainRef) ->
 
     {CbData, ETag} =
         case maps:find(provider, GrainRef) of
-            {ok, Provider={ProviderModule, ProviderName}} ->
+            {ok, Provider = {ProviderModule, ProviderName}} ->
                 case ProviderModule:read(CbModule, ProviderName, Id) of
                     {ok, SavedData, E} ->
                         {SavedData, E};
-                _ ->
-                    new_state(CbModule, Id)
-            end;
+                    _ ->
+                        new_state(CbModule, Id)
+                end;
             {ok, undefined} ->
                 Provider = undefined,
                 new_state(CbModule, Id);
@@ -392,8 +386,14 @@ init_(Parent, GrainRef) ->
             case Value of
                 {ok, CbData1, GrainOpts} ->
                     verify_and_enter_loop(
-                        Parent, GrainRef, CbModule, Id, Provider, ETag,
-                        GrainOpts, CbData1
+                        Parent,
+                        GrainRef,
+                        CbModule,
+                        Id,
+                        Provider,
+                        ETag,
+                        GrainOpts,
+                        CbData1
                     );
                 {error, notfound} ->
                     %% activate returning {error, notfound} is given special
@@ -403,13 +403,11 @@ init_(Parent, GrainRef) ->
                     %% from `erleans_grain`
                     maybe_unregister(get(grain_ref)),
                     partisan_proc_lib:init_ack(Parent, ignore);
-
                 {error, Reason} ->
                     maybe_unregister(get(grain_ref)),
                     partisan_proc_lib:init_ack(Parent, {error, Reason})
             end
     end.
-
 
 new_state(CbModule, Id) ->
     case erlang:function_exported(CbModule, state, 1) of
@@ -423,24 +421,28 @@ verify_and_enter_loop(Parent, GrainRef, CbModule, Id, Provider, ETag, GrainOpts,
     {CbData2, ETag1} = verify_etag(CbModule, Id, Provider, ETag, CbData1),
     CreateTime = maps:get(create_time, GrainOpts, erlang:system_time(seconds)),
     DeactivateAfter = maps:get(deactivate_after, GrainOpts, erleans_config:get(deactivate_after)),
-    Data = #data{cb_module        = CbModule,
-                 cb_state         = CbData2,
-                 id               = Id,
-                 etag             = ETag1,
-                 provider         = Provider,
-                 ref              = GrainRef,
-                 create_time      = CreateTime,
-                 deactivate_after = case DeactivateAfter of 0 -> infinity; _ -> DeactivateAfter end
-                },
+    Data = #data{
+        cb_module = CbModule,
+        cb_state = CbData2,
+        id = Id,
+        etag = ETag1,
+        provider = Provider,
+        ref = GrainRef,
+        create_time = CreateTime,
+        deactivate_after =
+            case DeactivateAfter of
+                0 -> infinity;
+                _ -> DeactivateAfter
+            end
+    },
     partisan_proc_lib:init_ack(Parent, {ok, self()}),
     partisan_gen_statem:enter_loop(?MODULE, [], active, Data).
 
 callback_mode() ->
     [state_functions, state_enter].
 
-active(enter, _OldState, Data=#data{deactivate_after=DeactivateAfter}) ->
+active(enter, _OldState, Data = #data{deactivate_after = DeactivateAfter}) ->
     {keep_state, Data, [{state_timeout, DeactivateAfter, activation_expiry}]};
-
 active({call, From}, {_, ReqType, grain_ref}, #data{} = Data) ->
     CbData = Data#data.cb_state,
     maybe_crash(CbData),
@@ -448,38 +450,65 @@ active({call, From}, {_, ReqType, grain_ref}, #data{} = Data) ->
     handle_result(
         Result, Data, upd_timer(ReqType, Data#data.deactivate_after)
     );
-
-active({call, From}, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
-                                                           cb_state=CbData,
-                                                           deactivate_after=DeactivateAfter}) ->
+active(
+    {call, From},
+    {undefined, ReqType, Msg},
+    Data = #data{
+        cb_module = CbModule,
+        cb_state = CbData,
+        deactivate_after = DeactivateAfter
+    }
+) ->
     maybe_crash(CbData),
-    handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter));
-active({call, From}, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
-                                                         cb_state=CbData,
-                                                         deactivate_after=DeactivateAfter}) ->
+    handle_result(
+        CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter)
+    );
+active(
+    {call, From},
+    {SpanCtx, ReqType, Msg},
+    Data = #data{
+        cb_module = CbModule,
+        cb_state = CbData,
+        deactivate_after = DeactivateAfter
+    }
+) ->
     maybe_crash(CbData),
     ?start_span(span_name(Msg), #{parent => SpanCtx}),
     ?set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
-    try handle_result(CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter))
+    try
+        handle_result(
+            CbModule:handle_call(Msg, From, CbData), Data, upd_timer(ReqType, DeactivateAfter)
+        )
     after
         ?end_span()
     end;
-
 active(cast, {_, _, deactivate} = Event, #data{} = Data) ->
     handle_event(cast, Event, active, Data);
-
-active(cast, {undefined, ReqType, Msg}, Data=#data{cb_module=CbModule,
-                                                   cb_state=CbData,
-                                                   deactivate_after=DeactivateAfter}) ->
+active(
+    cast,
+    {undefined, ReqType, Msg},
+    Data = #data{
+        cb_module = CbModule,
+        cb_state = CbData,
+        deactivate_after = DeactivateAfter
+    }
+) ->
     maybe_crash(CbData),
     handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter));
-active(cast, {SpanCtx, ReqType, Msg}, Data=#data{cb_module=CbModule,
-                                                 cb_state=CbData,
-                                                 deactivate_after=DeactivateAfter}) ->
+active(
+    cast,
+    {SpanCtx, ReqType, Msg},
+    Data = #data{
+        cb_module = CbModule,
+        cb_state = CbData,
+        deactivate_after = DeactivateAfter
+    }
+) ->
     maybe_crash(CbData),
     ?start_span(span_name(Msg), #{parent => SpanCtx}),
     ?set_attribute(<<"grain_msg">>, io_lib:format("~p", [Msg])),
-    try handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter))
+    try
+        handle_result(CbModule:handle_cast(Msg, CbData), Data, upd_timer(ReqType, DeactivateAfter))
     after
         ?end_span()
     end;
@@ -531,22 +560,32 @@ handle_event(_, {cancel_timer, _Pid, _TimeLeft}, _, _Data) ->
     keep_state_and_data;
 handle_event(info, {'EXIT', _, Reason}, _, Data) ->
     {stop, {shutdown, Reason}, Data};
-handle_event(_, Message, _, Data=#data{cb_module=CbModule,
-                                       cb_state=CbData}) ->
+handle_event(
+    _,
+    Message,
+    _,
+    Data = #data{
+        cb_module = CbModule,
+        cb_state = CbData
+    }
+) ->
     Reply = erleans_utils:fun_or_default(CbModule, handle_info, 2, [Message, CbData], {ok, CbData}),
     handle_result(Reply, Data, []).
 
 code_change(_OldVsn, State, Data, _Extra) ->
     {ok, State, Data}.
 
-terminate({shutdown, Reason}, _State, #data{ref=GrainRef})
-        when Reason == deactivated;
-             Reason == committed_suicide ->
+terminate({shutdown, Reason}, _State, #data{ref = GrainRef}) when
+    Reason == deactivated;
+    Reason == committed_suicide
+->
     maybe_remove_worker(GrainRef),
     ok;
-terminate(?NO_PROVIDER_ERROR, _State, #data{cb_module=CbModule,
-                                            id=Id,
-                                            ref=GrainRef}) ->
+terminate(?NO_PROVIDER_ERROR, _State, #data{
+    cb_module = CbModule,
+    id = Id,
+    ref = GrainRef
+}) ->
     maybe_remove_worker(GrainRef),
     ?LOG_ERROR(
         "attempted to save without storage provider configured: "
@@ -556,7 +595,7 @@ terminate(?NO_PROVIDER_ERROR, _State, #data{cb_module=CbModule,
     %% We do not want to call the deactivate callback here because this
     %% is not a deactivation, it is a hard crash.
     ok;
-terminate(Reason, _State, Data=#data{ref=GrainRef}) ->
+terminate(Reason, _State, Data = #data{ref = GrainRef}) ->
     maybe_remove_worker(GrainRef),
     ?LOG_INFO("at=terminate reason=~p", [Reason]),
     %% supervisor is terminating, node is probably shutting down.
@@ -566,13 +605,13 @@ terminate(Reason, _State, Data=#data{ref=GrainRef}) ->
 
 %% Internal functions
 
-maybe_add_worker(GrainRef=#{placement := {stateless, _}}) ->
+maybe_add_worker(GrainRef = #{placement := {stateless, _}}) ->
     gproc_pool:add_worker(?pool(GrainRef), self()),
     gproc_pool:connect_worker(?pool(GrainRef), self());
 maybe_add_worker(_) ->
     ok.
 
-maybe_remove_worker(GrainRef=#{placement := {stateless, _}}) ->
+maybe_remove_worker(GrainRef = #{placement := {stateless, _}}) ->
     gproc_pool:disconnect_worker(?pool(GrainRef), self()),
     gproc_pool:remove_worker(?pool(GrainRef), self());
 maybe_remove_worker(_) ->
@@ -600,12 +639,12 @@ upd_timer(cancel_timer, _) ->
 %% recoverable?
 finalize_and_stop(#data{} = Data) ->
     #data{
-        cb_module=CbModule,
-        id=Id,
-        ref=Ref,
-        provider=Provider,
-        cb_state=CbData,
-        etag=ETag
+        cb_module = CbModule,
+        id = Id,
+        ref = Ref,
+        provider = Provider,
+        cb_state = CbData,
+        etag = ETag
     } = Data,
 
     %% Save to or delete from backing storage.
@@ -616,34 +655,41 @@ finalize_and_stop(#data{} = Data) ->
     ),
 
     case Value of
-        {save_state, NewCbData={_, PersistentState}} ->
+        {save_state, NewCbData = {_, PersistentState}} ->
             %% We ignore the returned NewPersistentState
             {NewETag, _} = update_state(
                 CbModule, Provider, Id, PersistentState, ETag
             ),
-            {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
-                                                      etag=NewETag}};
+            {stop, {shutdown, deactivated}, Data#data{
+                cb_state = NewCbData,
+                etag = NewETag
+            }};
         {save_state, NewCbData} ->
             %% We ignore the returned NewPersistentState
             {NewETag, _} = update_state(
                 CbModule, Provider, Id, NewCbData, ETag
             ),
-            {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData,
-                                                      etag=NewETag}};
+            {stop, {shutdown, deactivated}, Data#data{
+                cb_state = NewCbData,
+                etag = NewETag
+            }};
         {ok, NewCbData} ->
-            {stop, {shutdown, deactivated}, Data#data{cb_state=NewCbData}}
+            {stop, {shutdown, deactivated}, Data#data{cb_state = NewCbData}};
+        {error, Reason} ->
+            ?LOG_ERROR("Grain deactivation failed. ID: ~p, Reason: ~p", [Id, Reason]),
+            {stop, {shutdown, deactivated}, Data}
     end.
 
-handle_result({ok, NewCbData}, Data=#data{ref=_GrainRef}, Actions) ->
-    {keep_state, Data#data{cb_state=NewCbData}, Actions};
-handle_result({ok, NewCbData, CbActions}, Data=#data{ref=_GrainRef}, Actions) ->
+handle_result({ok, NewCbData}, Data = #data{ref = _GrainRef}, Actions) ->
+    {keep_state, Data#data{cb_state = NewCbData}, Actions};
+handle_result({ok, NewCbData, CbActions}, Data = #data{ref = _GrainRef}, Actions) ->
     {Actions1, Data1} = handle_actions(CbActions, Actions, NewCbData, Data),
-    {keep_state, Data1#data{cb_state=NewCbData}, Actions1};
+    {keep_state, Data1#data{cb_state = NewCbData}, Actions1};
 handle_result({deactivate, NewCbData}, Data, _) ->
-    {next_state, deactivating, Data#data{cb_state=NewCbData}, []};
+    {next_state, deactivating, Data#data{cb_state = NewCbData}, []};
 handle_result({deactivate, NewCbData, CbActions}, Data, _) ->
     {Actions1, Data1} = handle_actions(CbActions, [], NewCbData, Data),
-    {next_state, deactivating, Data1#data{cb_state=NewCbData}, Actions1};
+    {next_state, deactivating, Data1#data{cb_state = NewCbData}, Actions1};
 handle_result({commit_suicide, Replies}, _Data, _Actions) ->
     {stop_and_reply, {shutdown, committed_suicide}, Replies}.
 
@@ -655,30 +701,35 @@ handle_actions([{cast, Msg} | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [{next_event, cast, {leave_timer, Msg}} | ActionsAcc], CbData, Data);
 handle_actions([{info, Msg} | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [{next_event, info, {leave_timer, Msg}} | ActionsAcc], CbData, Data);
-handle_actions([R={reply, _, _} | Rest], ActionsAcc, CbData, Data) ->
+handle_actions([R = {reply, _, _} | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [R | ActionsAcc], CbData, Data);
 handle_actions([hibernate | Rest], ActionsAcc, CbData, Data) ->
     handle_actions(Rest, [hibernate | ActionsAcc], CbData, Data);
 handle_actions([save_state | Rest], ActionsAcc, CbData, Data) ->
     {NewETag, NewState} = update_state(CbData, Data),
-    NewCbData = case CbData of
-        {Ephimeral, _} ->
-            {Ephimeral, NewState};
-        CbData ->
-            NewState
-    end,
-    handle_actions(Rest, ActionsAcc, CbData, Data#data{cb_state=NewCbData,
-                                                       etag=NewETag});
+    NewCbData =
+        case CbData of
+            {Ephimeral, _} ->
+                {Ephimeral, NewState};
+            CbData ->
+                NewState
+        end,
+    handle_actions(Rest, ActionsAcc, CbData, Data#data{
+        cb_state = NewCbData,
+        etag = NewETag
+    });
 handle_actions([A | _Rest], _ActionsAcc, _CbData, _Data) ->
     %% unknown action, exit with reason bad_action
     exit({bad_action, A}).
 
 update_state({_Ephemeral, Persistent}, Data) ->
     update_state(Persistent, Data);
-update_state(CbData, #data{id=Id,
-                           cb_module=CbModule,
-                           provider=Provider,
-                           etag=ETag}) ->
+update_state(CbData, #data{
+    id = Id,
+    cb_module = CbModule,
+    provider = Provider,
+    etag = ETag
+}) ->
     update_state(CbModule, Provider, Id, CbData, ETag).
 
 update_state(_CbModule, undefined, _Id, _CbData, _ETag) ->
@@ -697,7 +748,7 @@ update_state(CbModule, {Provider, ProviderName}, Id, Data, ETag, NewETag) ->
             exit(Reason)
     end.
 
-verify_etag(CbModule, Id, {Provider, ProviderName}, undefined, D={_, CbData}) ->
+verify_etag(CbModule, Id, {Provider, ProviderName}, undefined, D = {_, CbData}) ->
     ETag = etag(CbData),
     Provider:insert(CbModule, ProviderName, Id, CbData, ETag),
     {D, ETag};
@@ -721,7 +772,6 @@ maybe_crash({error, Reason}) ->
     exit(Reason);
 maybe_crash(_) ->
     ok.
-
 
 %% @private
 set_partisan_channel(Mod) ->
